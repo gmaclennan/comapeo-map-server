@@ -66,10 +66,6 @@ describe('Maps API', () => {
 		const response = await fetch(`${baseUrl}/maps/default/style.json`, {
 			redirect: 'manual', // Don't follow redirects
 		})
-		if (response.status !== 302) {
-			const body = await response.text()
-			console.log('Unexpected status:', response.status, 'Body:', body)
-		}
 		expect(response.status).toBe(302)
 		const location = response.headers.get('location')
 		expect(location).toBeTruthy()
