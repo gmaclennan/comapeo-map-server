@@ -122,8 +122,9 @@ export class Context {
 						const existingReader = await existingReaderPromise
 						await existingReader.close().catch(noop)
 					}
-					await fsPromises.cp(tempPath, mapFileUrl, { force: true })
-					return new Reader(mapFileUrl)
+					const mapFilePath = fileURLToPath(mapFileUrl)
+					await fsPromises.cp(tempPath, mapFilePath, { force: true })
+					return new Reader(mapFilePath)
 				})()
 				this.#mapReaders.set(mapId, readerPromise)
 			},
