@@ -40,11 +40,46 @@ export function createServer({ keyPair, ...contextOptions }: ServerOptions) {
 		},
 	})
 	const router = RootRouter({ base: '/' }, context)
-	const serverAdapter = createServerAdapter<FetchContext>(router.fetch)
-	const localHttpServer = http.createServer((req, res) => {
-		serverAdapter.handleNodeRequestAndResponse(req, res, {
-			isLocalhost: true,
-		})
+	const serverAdapter = createServerAdapter<FetchContext>((request, context) =>
+		router.fetch(request, context),
+	)
+	const localHttpServer = http.createServer(async (req, res) => {
+		try {
+			const request = new Request(`http://${req.headers.host}${req.url}`, {
+				method: req.method,
+				headers: req.headers as HeadersInit,
+				body:
+					req.method !== 'GET' && req.method !== 'HEAD'
+						? (req as unknown as ReadableStream)
+						: undefined,
+			})
+
+			const response = await router.fetch(request, { isLocalhost: true })
+
+			res.statusCode = response.status
+			response.headers.forEach((value, key) => {
+				res.setHeader(key, value)
+			})
+
+			if (response.body) {
+				const reader = response.body.getReader()
+				const pump = async () => {
+					while (true) {
+						const { done, value } = await reader.read()
+						if (done) break
+						res.write(value)
+					}
+					res.end()
+				}
+				await pump()
+			} else {
+				res.end()
+			}
+		} catch (err) {
+			console.error('Error handling request:', err)
+			res.statusCode = 500
+			res.end('Internal Server Error')
+		}
 	})
 	const remoteHttpServer = http.createServer((req, res) => {
 		serverAdapter.handleNodeRequestAndResponse(req, res, {
@@ -59,7 +94,7 @@ export function createServer({ keyPair, ...contextOptions }: ServerOptions) {
 
 	return {
 		async listen(opts: ListenOptions = {}) {
-			localHttpServer.listen(opts.localPort, '127.0.0.0')
+			localHttpServer.listen(opts.localPort, '127.0.0.1')
 			secretStreamServer.listen(opts.remotePort, '0.0.0.0')
 			await Promise.all([
 				once(localHttpServer, 'listening'),
