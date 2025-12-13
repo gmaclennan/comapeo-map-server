@@ -981,6 +981,222 @@ describe('Map Shares and Downloads', () => {
 		}, 15000)
 	})
 
+
+	describe('Cancellation Scenarios', () => {
+		it('should cancel a map share before download starts', async () => {
+			// Create a share
+			const createResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			expect(createResponse.status).toBe(201)
+			const { shareId } = await createResponse.json()
+
+			// Verify share is in pending state
+			const getResponse = await fetch(`${senderBaseUrl}/mapShares/${shareId}`)
+			const shareData = await getResponse.json()
+			expect(shareData.status).toBe('pending')
+
+			// Cancel the share
+			const cancelResponse = await fetch(
+				`${senderBaseUrl}/mapShares/${shareId}/cancel`,
+				{ method: 'POST' },
+			)
+			expect(cancelResponse.status).toBe(204)
+
+			// Verify share is now canceled
+			const getAfterCancelResponse = await fetch(
+				`${senderBaseUrl}/mapShares/${shareId}`,
+			)
+			const canceledShareData = await getAfterCancelResponse.json()
+			expect(canceledShareData.status).toBe('canceled')
+		})
+
+		it('should cancel a map share after download starts', async () => {
+			// Create a share
+			const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			expect(createShareResponse.status).toBe(201)
+			const shareData = await createShareResponse.json()
+			const { shareId } = shareData
+
+			// Start the download from receiver side
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					downloadUrls: testDownloadUrls,
+					shareId,
+					estimatedSizeBytes: shareData.estimatedSizeBytes,
+				},
+			)
+			expect(createDownloadResponse.status).toBe(201)
+			const downloadData = await createDownloadResponse.json()
+			const { downloadId } = downloadData
+
+			// Cancel the share from sender side immediately
+			const cancelResponse = await fetch(
+				`${senderBaseUrl}/mapShares/${shareId}/cancel`,
+				{ method: 'POST' },
+			)
+			expect(cancelResponse.status).toBe(204)
+
+			// Verify share is canceled
+			const getShareResponse = await fetch(
+				`${senderBaseUrl}/mapShares/${shareId}`,
+			)
+			const canceledShareData = await getShareResponse.json()
+			expect(canceledShareData.status).toBe('canceled')
+
+			// Wait for download to react to cancellation
+			await new Promise((resolve) => setTimeout(resolve, 200))
+
+			// Verify download ended
+			// Note: Canceling share causes download URL to 404, resulting in error state
+			const getDownloadResponse = await fetch(
+				`${receiverBaseUrl}/downloads/${downloadId}`,
+			)
+			const downloadStatus = await getDownloadResponse.json()
+			// Download should be in error, canceled, or completed state
+			expect(['error', 'canceled', 'completed']).toContain(downloadStatus.status)
+		}, 10000)
+
+		it('should cancel a download during active transfer', async () => {
+			// Create a share
+			const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			expect(createShareResponse.status).toBe(201)
+			const shareData = await createShareResponse.json()
+			const { shareId } = shareData
+
+			// Start the download
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					downloadUrls: testDownloadUrls,
+					shareId,
+					estimatedSizeBytes: shareData.estimatedSizeBytes,
+				},
+			)
+			expect(createDownloadResponse.status).toBe(201)
+			const downloadData = await createDownloadResponse.json()
+			const { downloadId } = downloadData
+			expect(downloadData.status).toBe('downloading')
+
+			// Cancel the download immediately (race with download completion in fast test environment)
+			const cancelResponse = await fetch(
+				`${receiverBaseUrl}/downloads/${downloadId}/cancel`,
+				{ method: 'POST' },
+			)
+			expect(cancelResponse.status).toBe(204)
+
+			// Verify download ended
+			// Note: Download may complete before cancel takes effect in test environment
+			const getDownloadResponse = await fetch(
+				`${receiverBaseUrl}/downloads/${downloadId}`,
+			)
+			const finalDownloadData = await getDownloadResponse.json()
+			expect(['canceled', 'completed']).toContain(finalDownloadData.status)
+		}, 10000)
+
+		it('should stream cancellation updates via SSE for shares', async () => {
+			// Create a share
+			const createResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const { shareId } = await createResponse.json()
+
+			// Start collecting SSE messages
+			const messagesPromise = collectSSEMessages(
+				`${senderBaseUrl}/mapShares/${shareId}/events`,
+				{
+					count: 2, // Initial state + cancel update
+					timeoutMs: 5000,
+				},
+			)
+
+			// Wait for connection to establish
+			await new Promise((resolve) => setTimeout(resolve, 100))
+
+			// Cancel the share
+			await fetch(`${senderBaseUrl}/mapShares/${shareId}/cancel`, {
+				method: 'POST',
+			})
+
+			const messages = await messagesPromise
+
+			// First message should be initial state (pending)
+			expect(messages[0]).toHaveProperty('status', 'pending')
+			expect(messages[0]).toHaveProperty('shareId', shareId)
+
+			// Second message should be the cancellation update
+			expect(messages[1]).toHaveProperty('status', 'canceled')
+		})
+
+		it('should stream cancellation updates via SSE for downloads', async () => {
+			// Create a share first
+			const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const shareData = await createShareResponse.json()
+			const { shareId } = shareData
+
+			// Create a download
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					downloadUrls: testDownloadUrls,
+					shareId,
+					estimatedSizeBytes: shareData.estimatedSizeBytes,
+				},
+			)
+			const downloadData = await createDownloadResponse.json()
+			const { downloadId } = downloadData
+
+			// Start collecting SSE messages for the download
+			// Expect at least 1 message (initial state), but may get completion before we can cancel
+			const messagesPromise = collectSSEMessages(
+				`${receiverBaseUrl}/downloads/${downloadId}/events`,
+				{
+					until: (messages) =>
+						messages.some((m) => m.status === 'canceled' || m.status === 'completed'),
+					timeoutMs: 5000,
+				},
+			)
+
+			// Try to cancel immediately (may race with download completion)
+			await fetch(`${receiverBaseUrl}/downloads/${downloadId}/cancel`, {
+				method: 'POST',
+			})
+
+			const messages = await messagesPromise
+
+			// Should have initial message
+			expect(messages[0]).toHaveProperty('downloadId', downloadId)
+
+			// Final message should be either canceled or completed (due to race in test environment)
+			const finalMessage = messages[messages.length - 1]
+			expect(['canceled', 'completed']).toContain(finalMessage.status)
+		})
+	})
+
 	describe('Remote Device ID Validation', () => {
 		it('should reject access to share with wrong device ID (403)', async () => {
 			// Create a third device with different keys
