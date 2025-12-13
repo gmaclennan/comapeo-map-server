@@ -65,7 +65,8 @@ export class MapShare extends TypedEventTarget<
 		this.#download?.removeAllEventListeners()
 		this.#download = new DownloadResponse(readable)
 		this.#download.addEventListener('update', (event) => {
-			this.#updateState(event)
+			// Defer state update to avoid event recursion (ERR_EVENT_RECURSION)
+			queueMicrotask(() => this.#updateState(event))
 		})
 		return this.#download.response
 	}
