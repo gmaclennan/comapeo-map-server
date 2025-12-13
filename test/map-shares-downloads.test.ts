@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { createRequire } from 'node:module'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -6,6 +7,10 @@ import { fileURLToPath } from 'node:url'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import z32 from 'z32'
 import { createServer } from '../src/index.js'
+
+// EventSource is a CommonJS module, use require to import it
+const require = createRequire(import.meta.url)
+const { EventSource } = require('eventsource')
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -468,6 +473,382 @@ describe('Map Shares and Downloads', () => {
 			})
 
 			expect(response.status).toBe(404)
+		})
+	})
+
+	describe('Server-Sent Events (SSE)', () => {
+		describe('Map Share Events', () => {
+			it('should stream initial state when connecting to events endpoint', async () => {
+				// Create a share
+				const createResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+					},
+					body: JSON.stringify({
+						mapId: 'custom',
+						receiverDeviceId,
+					}),
+				})
+				const { shareId } = await createResponse.json()
+
+				// Connect to SSE endpoint
+				const eventSource = new EventSource(
+					`${senderBaseUrl}/mapShares/${shareId}/events`,
+				)
+
+				// Wait for initial message
+				const initialState = await new Promise((resolve, reject) => {
+					const timeout = setTimeout(() => {
+						eventSource.close()
+						reject(new Error('Timeout waiting for SSE message'))
+					}, 5000)
+
+					eventSource.onmessage = (event) => {
+						clearTimeout(timeout)
+						eventSource.close()
+						resolve(JSON.parse(event.data))
+					}
+
+					eventSource.onerror = (error) => {
+						clearTimeout(timeout)
+						eventSource.close()
+						reject(error)
+					}
+				})
+
+				expect(initialState).toHaveProperty('shareId', shareId)
+				expect(initialState).toHaveProperty('status', 'pending')
+				expect(initialState).toHaveProperty('mapId', 'custom')
+			})
+
+			it('should stream state updates when share is cancelled', async () => {
+				// Create a share
+				const createResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+					},
+					body: JSON.stringify({
+						mapId: 'custom',
+						receiverDeviceId,
+					}),
+				})
+				const { shareId } = await createResponse.json()
+
+				// Connect to SSE endpoint
+				const eventSource = new EventSource(
+					`${senderBaseUrl}/mapShares/${shareId}/events`,
+				)
+
+				const messages: any[] = []
+
+				// Collect messages
+				const updatePromise = new Promise((resolve, reject) => {
+					const timeout = setTimeout(() => {
+						eventSource.close()
+						reject(new Error('Timeout waiting for update'))
+					}, 5000)
+
+					eventSource.onmessage = (event) => {
+						const data = JSON.parse(event.data)
+						messages.push(data)
+
+						// After receiving 2 messages (initial + update), resolve
+						if (messages.length >= 2) {
+							clearTimeout(timeout)
+							eventSource.close()
+							resolve(messages)
+						}
+					}
+
+					eventSource.onerror = (error) => {
+						clearTimeout(timeout)
+						eventSource.close()
+						reject(error)
+					}
+				})
+
+				// Wait for connection and initial message
+				await new Promise((resolve) => setTimeout(resolve, 100))
+
+				// Cancel the share to trigger an update
+				await fetch(`${senderBaseUrl}/mapShares/${shareId}/cancel`, {
+					method: 'POST',
+				})
+
+				await updatePromise
+
+				// First message should be initial state (pending)
+				expect(messages[0]).toHaveProperty('status', 'pending')
+
+				// Second message should be the cancel update
+				expect(messages[1]).toHaveProperty('status', 'canceled')
+			})
+
+			it('should stream state updates when share is declined', async () => {
+				// Create a share
+				const createResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+					},
+					body: JSON.stringify({
+						mapId: 'custom',
+						receiverDeviceId,
+					}),
+				})
+				const { shareId } = await createResponse.json()
+
+				// Connect to SSE endpoint
+				const eventSource = new EventSource(
+					`${senderBaseUrl}/mapShares/${shareId}/events`,
+				)
+
+				const messages: any[] = []
+
+				const updatePromise = new Promise((resolve, reject) => {
+					const timeout = setTimeout(() => {
+						eventSource.close()
+						reject(new Error('Timeout waiting for decline update'))
+					}, 5000)
+
+					eventSource.onmessage = (event) => {
+						const data = JSON.parse(event.data)
+						messages.push(data)
+
+						if (messages.length >= 2) {
+							clearTimeout(timeout)
+							eventSource.close()
+							resolve(messages)
+						}
+					}
+
+					eventSource.onerror = (error) => {
+						clearTimeout(timeout)
+						eventSource.close()
+						reject(error)
+					}
+				})
+
+				// Wait for connection
+				await new Promise((resolve) => setTimeout(resolve, 100))
+
+				// Decline the share
+				await fetch(`${senderBaseUrl}/mapShares/${shareId}/decline`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+					},
+					body: JSON.stringify({
+						reason: 'user_rejected',
+					}),
+				})
+
+				await updatePromise
+
+				// Second message should be the decline update
+				expect(messages[1]).toHaveProperty('status', 'declined')
+				expect(messages[1]).toHaveProperty('reason', 'user_rejected')
+			})
+
+			it('should return 404 for SSE on non-existent share', async () => {
+				const eventSource = new EventSource(
+					`${senderBaseUrl}/mapShares/nonexistent-id/events`,
+				)
+
+				const error = await new Promise((resolve) => {
+					const timeout = setTimeout(() => {
+						eventSource.close()
+						resolve(null)
+					}, 2000)
+
+					eventSource.onerror = (err) => {
+						clearTimeout(timeout)
+						eventSource.close()
+						resolve(err)
+					}
+				})
+
+				expect(error).toBeTruthy()
+			})
+
+			it('should properly close SSE connection when client disconnects', async () => {
+				// Create a share
+				const createResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+					},
+					body: JSON.stringify({
+						mapId: 'custom',
+						receiverDeviceId,
+					}),
+				})
+				const { shareId } = await createResponse.json()
+
+				// Connect and immediately disconnect
+				const eventSource = new EventSource(
+					`${senderBaseUrl}/mapShares/${shareId}/events`,
+				)
+
+				await new Promise((resolve) => setTimeout(resolve, 100))
+				eventSource.close()
+
+				// Wait a bit to ensure cleanup
+				await new Promise((resolve) => setTimeout(resolve, 100))
+
+				// Share should still exist and be queryable
+				const getResponse = await fetch(`${senderBaseUrl}/mapShares/${shareId}`)
+				expect(getResponse.status).toBe(200)
+			})
+		})
+
+		describe('Download Events', () => {
+			it('should stream initial state for download events', async () => {
+				// Create a download
+				const createResponse = await fetch(`${receiverBaseUrl}/downloads`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+					},
+					body: JSON.stringify({
+						senderDeviceId,
+						shareId: 'test-share-sse',
+						downloadUrls: [
+							`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-sse/download`,
+						],
+						estimatedSizeBytes: 1000000,
+					}),
+				})
+				const { downloadId } = await createResponse.json()
+
+				// Connect to SSE endpoint
+				const eventSource = new EventSource(
+					`${receiverBaseUrl}/downloads/${downloadId}/events`,
+				)
+
+				const initialState = await new Promise((resolve, reject) => {
+					const timeout = setTimeout(() => {
+						eventSource.close()
+						reject(new Error('Timeout waiting for download SSE message'))
+					}, 5000)
+
+					eventSource.onmessage = (event) => {
+						clearTimeout(timeout)
+						eventSource.close()
+						resolve(JSON.parse(event.data))
+					}
+
+					eventSource.onerror = (error) => {
+						clearTimeout(timeout)
+						eventSource.close()
+						reject(error)
+					}
+				})
+
+				expect(initialState).toHaveProperty('downloadId', downloadId)
+				expect(initialState).toHaveProperty('status', 'downloading')
+				expect(initialState).toHaveProperty('bytesDownloaded')
+			})
+
+			it('should stream state updates when download is cancelled', async () => {
+				// Create a download
+				const createResponse = await fetch(`${receiverBaseUrl}/downloads`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+					},
+					body: JSON.stringify({
+						senderDeviceId,
+						shareId: 'test-share-cancel-sse',
+						downloadUrls: [
+							`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-cancel-sse/download`,
+						],
+						estimatedSizeBytes: 1000000,
+					}),
+				})
+				const { downloadId } = await createResponse.json()
+
+				// Connect to SSE endpoint
+				const eventSource = new EventSource(
+					`${receiverBaseUrl}/downloads/${downloadId}/events`,
+				)
+
+				const messages: any[] = []
+				let resolved = false
+
+				const updatePromise = new Promise((resolve, reject) => {
+					const timeout = setTimeout(() => {
+						if (!resolved) {
+							eventSource.close()
+							reject(new Error('Timeout waiting for download update'))
+						}
+					}, 5000)
+
+					eventSource.onmessage = (event) => {
+						const data = JSON.parse(event.data)
+						messages.push(data)
+
+						// Look for error/canceled status
+						if (data.status === 'error' || data.status === 'canceled') {
+							if (!resolved) {
+								resolved = true
+								clearTimeout(timeout)
+								eventSource.close()
+								resolve(messages)
+							}
+						}
+					}
+
+					eventSource.onerror = (error) => {
+						if (!resolved) {
+							resolved = true
+							clearTimeout(timeout)
+							eventSource.close()
+							reject(error)
+						}
+					}
+				})
+
+				// Wait for connection
+				await new Promise((resolve) => setTimeout(resolve, 100))
+
+				// Cancel the download
+				await fetch(`${receiverBaseUrl}/downloads/${downloadId}/cancel`, {
+					method: 'POST',
+				})
+
+				await updatePromise
+
+				// Should have received at least one message
+				expect(messages.length).toBeGreaterThan(0)
+
+				// Last message should indicate error or canceled
+				const lastMessage = messages[messages.length - 1]
+				expect(['error', 'canceled']).toContain(lastMessage.status)
+			})
+
+			it('should return 404 for SSE on non-existent download', async () => {
+				const eventSource = new EventSource(
+					`${receiverBaseUrl}/downloads/nonexistent-download-id/events`,
+				)
+
+				const error = await new Promise((resolve) => {
+					const timeout = setTimeout(() => {
+						eventSource.close()
+						resolve(null)
+					}, 2000)
+
+					eventSource.onerror = (err) => {
+						clearTimeout(timeout)
+						eventSource.close()
+						resolve(err)
+					}
+				})
+
+				expect(error).toBeTruthy()
+			})
 		})
 	})
 })

@@ -22,16 +22,22 @@ export function createEventStreamResponse(
 	{ signal }: { signal: AbortSignal },
 ): Response {
 	let listener: (event: Event & { type: 'update' }) => void | undefined
+	let controller: ReadableStreamDefaultController<Uint8Array>
 	const stream = new ReadableStream({
-		start(controller) {
+		start(ctrl) {
+			controller = ctrl
 			controller.enqueue(
 				encoder.encode(`data: ${JSON.stringify(eventTarget.state)}\n\n`),
 			)
 			listener = (event) => {
 				const { type, ...update } = event
-				controller.enqueue(
-					encoder.encode(`data: ${JSON.stringify(update)}\n\n`),
-				)
+				try {
+					controller.enqueue(
+						encoder.encode(`data: ${JSON.stringify(update)}\n\n`),
+					)
+				} catch {
+					// Stream may be closed, ignore
+				}
 			}
 			eventTarget.addEventListener('update', listener)
 		},
@@ -42,7 +48,12 @@ export function createEventStreamResponse(
 	signal.addEventListener(
 		'abort',
 		() => {
-			stream.cancel()
+			try {
+				controller?.close()
+			} catch {
+				// Stream may already be closed, ignore
+			}
+			listener && eventTarget.removeEventListener('update', listener)
 		},
 		{ once: true },
 	)
