@@ -1195,6 +1195,157 @@ describe('Map Shares and Downloads', () => {
 			const finalMessage = messages[messages.length - 1]
 			expect(['canceled', 'completed']).toContain(finalMessage.status)
 		})
+
+		it('should not corrupt existing custom map when download is cancelled by receiver', async () => {
+			// First, create an initial custom map on the receiver
+			const fixtureMapPath = path.join(__dirname, 'fixtures', 'demotiles-z2.smp')
+			fs.copyFileSync(fixtureMapPath, tempReceiverMapPath)
+
+			// Get original map stats
+			const originalStats = fs.statSync(tempReceiverMapPath)
+			const originalSize = originalStats.size
+
+			// Verify we can read the original map
+			const originalMapInfoResponse = await fetch(
+				`${receiverBaseUrl}/maps/custom/info`,
+			)
+			expect(originalMapInfoResponse.status).toBe(200)
+			const originalMapInfo = await originalMapInfoResponse.json()
+			expect(originalMapInfo.size).toBe(originalSize)
+
+			// Create a share from sender
+			const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const shareData = await createShareResponse.json()
+			const { shareId } = shareData
+
+			// Start a download
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					downloadUrls: testDownloadUrls,
+					shareId,
+					estimatedSizeBytes: shareData.estimatedSizeBytes,
+				},
+			)
+			expect(createDownloadResponse.status).toBe(201)
+			const { downloadId } = await createDownloadResponse.json()
+
+			// Cancel the download immediately
+			await fetch(`${receiverBaseUrl}/downloads/${downloadId}/cancel`, {
+				method: 'POST',
+			})
+
+			// Wait a moment for cancellation to process
+			await new Promise((resolve) => setTimeout(resolve, 200))
+
+			// Verify the original map file still exists and is unchanged
+			expect(fs.existsSync(tempReceiverMapPath)).toBe(true)
+			const afterCancelStats = fs.statSync(tempReceiverMapPath)
+			expect(afterCancelStats.size).toBe(originalSize)
+
+			// Verify we can still read the original map
+			const afterCancelMapInfoResponse = await fetch(
+				`${receiverBaseUrl}/maps/custom/info`,
+			)
+			expect(afterCancelMapInfoResponse.status).toBe(200)
+			const afterCancelMapInfo = await afterCancelMapInfoResponse.json()
+			expect(afterCancelMapInfo.size).toBe(originalSize)
+			expect(afterCancelMapInfo.mapId).toBe(originalMapInfo.mapId)
+		}, 10000)
+
+		it('should not corrupt existing custom map when download is cancelled by sender', async () => {
+			// Create an initial custom map on the receiver
+			const fixtureMapPath = path.join(__dirname, 'fixtures', 'demotiles-z2.smp')
+			fs.copyFileSync(fixtureMapPath, tempReceiverMapPath)
+
+			// Get original map stats
+			const originalStats = fs.statSync(tempReceiverMapPath)
+			const originalSize = originalStats.size
+
+			// Create a share from sender
+			const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const shareData = await createShareResponse.json()
+			const { shareId } = shareData
+
+			// Start a download
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					downloadUrls: testDownloadUrls,
+					shareId,
+					estimatedSizeBytes: shareData.estimatedSizeBytes,
+				},
+			)
+			expect(createDownloadResponse.status).toBe(201)
+
+			// Cancel the share from sender side (which will cause download to fail)
+			await fetch(`${senderBaseUrl}/mapShares/${shareId}/cancel`, {
+				method: 'POST',
+			})
+
+			// Wait for cancellation to propagate and download to fail
+			await new Promise((resolve) => setTimeout(resolve, 500))
+
+			// Verify the original map file still exists and is unchanged
+			expect(fs.existsSync(tempReceiverMapPath)).toBe(true)
+			const afterCancelStats = fs.statSync(tempReceiverMapPath)
+			expect(afterCancelStats.size).toBe(originalSize)
+
+			// Verify we can still read the original map
+			const afterCancelMapInfoResponse = await fetch(
+				`${receiverBaseUrl}/maps/custom/info`,
+			)
+			expect(afterCancelMapInfoResponse.status).toBe(200)
+			const afterCancelMapInfo = await afterCancelMapInfoResponse.json()
+			expect(afterCancelMapInfo.size).toBe(originalSize)
+		}, 10000)
+
+		it('should not leave temp files when download fails', async () => {
+			// Create a share with invalid data to cause download to fail quickly
+			const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const shareData = await createShareResponse.json()
+			const { shareId } = shareData
+
+			// Start a download
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					downloadUrls: testDownloadUrls,
+					shareId,
+					estimatedSizeBytes: shareData.estimatedSizeBytes,
+				},
+			)
+			const { downloadId } = await createDownloadResponse.json()
+
+			// Cancel immediately to trigger abort
+			await fetch(`${receiverBaseUrl}/downloads/${downloadId}/cancel`, {
+				method: 'POST',
+			})
+
+			// Wait for cleanup
+			await new Promise((resolve) => setTimeout(resolve, 500))
+		})
 	})
 
 	describe('Remote Device ID Validation', () => {
