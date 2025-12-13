@@ -314,13 +314,26 @@ describe('Map Shares and Downloads', () => {
 
 	describe('Downloads (Receiver)', () => {
 		it('should create a download request', async () => {
+			if (!nonLoopbackIP) {
+				console.warn('Skipping test: No non-loopback IP found')
+				return
+			}
+
+			// First create a share on the sender
+			const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			expect(createShareResponse.status).toBe(201)
+			const share = await createShareResponse.json()
+			const { shareId, downloadUrls, estimatedSizeBytes } = share
+
+			// Now create a download on the receiver using the real share
 			const response = await postJson(`${receiverBaseUrl}/downloads`, {
 				senderDeviceId,
-				shareId: 'test-share-id',
-				downloadUrls: [
-					`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-id/download`,
-				],
-				estimatedSizeBytes: 1000000,
+				shareId,
+				downloadUrls,
+				estimatedSizeBytes,
 			})
 			expect(response.status).toBe(201)
 
@@ -344,14 +357,25 @@ describe('Map Shares and Downloads', () => {
 		})
 
 		it('should get a specific download', async () => {
+			if (!nonLoopbackIP) {
+				console.warn('Skipping test: No non-loopback IP found')
+				return
+			}
+
+			// First create a share on the sender
+			const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const share = await createShareResponse.json()
+			const { shareId, downloadUrls, estimatedSizeBytes } = share
+
 			// Create a download
 			const createResponse = await postJson(`${receiverBaseUrl}/downloads`, {
 				senderDeviceId,
-				shareId: 'test-share-id-2',
-				downloadUrls: [
-					`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-id-2/download`,
-				],
-				estimatedSizeBytes: 1000000,
+				shareId,
+				downloadUrls,
+				estimatedSizeBytes,
 			})
 			const { downloadId } = await createResponse.json()
 
@@ -373,14 +397,25 @@ describe('Map Shares and Downloads', () => {
 		})
 
 		it('should cancel a download', async () => {
+			if (!nonLoopbackIP) {
+				console.warn('Skipping test: No non-loopback IP found')
+				return
+			}
+
+			// First create a share on the sender
+			const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const share = await createShareResponse.json()
+			const { shareId, downloadUrls, estimatedSizeBytes } = share
+
 			// Create a download
 			const createResponse = await postJson(`${receiverBaseUrl}/downloads`, {
 				senderDeviceId,
-				shareId: 'test-share-id-3',
-				downloadUrls: [
-					`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-id-3/download`,
-				],
-				estimatedSizeBytes: 1000000,
+				shareId,
+				downloadUrls,
+				estimatedSizeBytes,
 			})
 			const { downloadId } = await createResponse.json()
 
@@ -635,14 +670,25 @@ describe('Map Shares and Downloads', () => {
 
 		describe('Download Events', () => {
 			it('should stream initial state for download events', async () => {
+				if (!nonLoopbackIP) {
+					console.warn('Skipping test: No non-loopback IP found')
+					return
+				}
+
+				// First create a share on the sender
+				const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+					mapId: 'custom',
+					receiverDeviceId,
+				})
+				const share = await createShareResponse.json()
+				const { shareId, downloadUrls, estimatedSizeBytes } = share
+
 				// Create a download
 				const createResponse = await postJson(`${receiverBaseUrl}/downloads`, {
 					senderDeviceId,
-					shareId: 'test-share-sse',
-					downloadUrls: [
-						`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-sse/download`,
-					],
-					estimatedSizeBytes: 1000000,
+					shareId,
+					downloadUrls,
+					estimatedSizeBytes,
 				})
 				const { downloadId } = await createResponse.json()
 
@@ -657,14 +703,25 @@ describe('Map Shares and Downloads', () => {
 			})
 
 			it('should stream state updates when download is cancelled', async () => {
+				if (!nonLoopbackIP) {
+					console.warn('Skipping test: No non-loopback IP found')
+					return
+				}
+
+				// First create a share on the sender
+				const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+					mapId: 'custom',
+					receiverDeviceId,
+				})
+				const share = await createShareResponse.json()
+				const { shareId, downloadUrls, estimatedSizeBytes } = share
+
 				// Create a download
 				const createResponse = await postJson(`${receiverBaseUrl}/downloads`, {
 					senderDeviceId,
-					shareId: 'test-share-cancel-sse',
-					downloadUrls: [
-						`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-cancel-sse/download`,
-					],
-					estimatedSizeBytes: 1000000,
+					shareId,
+					downloadUrls,
+					estimatedSizeBytes,
 				})
 				const { downloadId } = await createResponse.json()
 
