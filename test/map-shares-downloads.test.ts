@@ -4,6 +4,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+	fetch as secretStreamFetch,
+	Agent as SecretStreamAgent,
+} from 'secret-stream-http'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import z32 from 'z32'
 import { createServer } from '../src/index.js'
@@ -55,10 +59,7 @@ describe('Map Shares and Downloads', () => {
 		nonLoopbackIP = getNonLoopbackIPv4()
 
 		// Setup sender server
-		senderKeyPair = {
-			publicKey: randomBytes(32),
-			secretKey: randomBytes(32),
-		}
+		senderKeyPair = SecretStreamAgent.keyPair()
 		senderDeviceId = z32.encode(senderKeyPair.publicKey)
 
 		// Copy fixture for sender
@@ -87,10 +88,7 @@ describe('Map Shares and Downloads', () => {
 		senderBaseUrl = `http://127.0.0.1:${senderLocalPort}`
 
 		// Setup receiver server
-		receiverKeyPair = {
-			publicKey: randomBytes(32),
-			secretKey: randomBytes(32),
-		}
+		receiverKeyPair = SecretStreamAgent.keyPair()
 		receiverDeviceId = z32.encode(receiverKeyPair.publicKey)
 
 		tempReceiverMapPath = path.join(
@@ -849,6 +847,397 @@ describe('Map Shares and Downloads', () => {
 
 				expect(error).toBeTruthy()
 			})
+		})
+	})
+
+	describe('End-to-End Share and Download Flow', () => {
+		it('should complete full share/download flow with actual data transfer', async () => {
+			// 1. Create a share on sender
+			const createShareResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					mapId: 'custom',
+					receiverDeviceId,
+				}),
+			})
+			expect(createShareResponse.status).toBe(201)
+			const shareData = await createShareResponse.json()
+			expect(shareData).toHaveProperty('shareId')
+			expect(shareData).toHaveProperty('downloadUrls')
+			// downloadUrls may be empty in test environment (no non-internal IPs)
+			// expect(shareData.downloadUrls.length).toBeGreaterThan(0)
+
+			const { shareId, downloadUrls, estimatedSizeBytes } = shareData
+
+			// 2. Receiver connects to sender's remote server to get share info
+			// Need to manually construct URL using localhost and remote port for testing
+			// (downloadUrls may contain external IPs that aren't accessible in test environment)
+			const shareInfoUrl = `http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}`
+			const shareInfoResponse = (await secretStreamFetch(shareInfoUrl, {
+				dispatcher: new SecretStreamAgent({
+					keyPair: receiverKeyPair,
+					remotePublicKey: senderKeyPair.publicKey,
+				}),
+			})) as unknown as Response
+
+			expect(shareInfoResponse.status).toBe(200)
+			const shareInfo = await shareInfoResponse.json()
+			expect(shareInfo.shareId).toBe(shareId)
+			expect(shareInfo.status).toBe('pending')
+
+			// 3. Receiver creates a download request
+			// Replace downloadUrls with localhost URL for testing
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await fetch(
+				`${receiverBaseUrl}/downloads`,
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						senderDeviceId,
+						downloadUrls: testDownloadUrls,
+						shareId,
+						estimatedSizeBytes,
+					}),
+				},
+			)
+			expect(createDownloadResponse.status).toBe(201)
+			const downloadData = await createDownloadResponse.json()
+			expect(downloadData).toHaveProperty('downloadId')
+
+			const { downloadId } = downloadData
+
+			// 4. Wait for download to complete
+			// Poll the download status until it completes
+			let downloadStatus = downloadData.status
+			let attempts = 0
+			const maxAttempts = 50 // 10 seconds max
+
+			while (
+				downloadStatus === 'downloading' &&
+				attempts < maxAttempts
+			) {
+				await new Promise((resolve) => setTimeout(resolve, 200))
+				const statusResponse = await fetch(
+					`${receiverBaseUrl}/downloads/${downloadId}`,
+				)
+				const status = await statusResponse.json()
+				downloadStatus = status.status
+				attempts++
+			}
+
+			// 5. Verify download completed successfully
+			expect(downloadStatus).toBe('completed')
+
+			// 6. Verify the downloaded file exists and has content
+			expect(fs.existsSync(tempReceiverMapPath)).toBe(true)
+			const stats = fs.statSync(tempReceiverMapPath)
+			expect(stats.size).toBeGreaterThan(0)
+
+			// 7. Verify sender's share status was updated
+			const senderShareResponse = await fetch(
+				`${senderBaseUrl}/mapShares/${shareId}`,
+			)
+			const senderShareStatus = await senderShareResponse.json()
+			expect(senderShareStatus.status).toBe('completed')
+		}, 15000)
+
+		it('should stream download progress via SSE during transfer', async () => {
+			// Create a share
+			const createShareResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					mapId: 'custom',
+					receiverDeviceId,
+				}),
+			})
+			const shareData = await createShareResponse.json()
+			const { shareId, downloadUrls, estimatedSizeBytes } = shareData
+
+			// Create a download with localhost URL
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await fetch(
+				`${receiverBaseUrl}/downloads`,
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						senderDeviceId,
+						downloadUrls: testDownloadUrls,
+						shareId,
+						estimatedSizeBytes,
+					}),
+				},
+			)
+			const downloadData = await createDownloadResponse.json()
+			const { downloadId } = downloadData
+
+			// Connect to SSE and track progress
+			const eventSource = new EventSource(
+				`${receiverBaseUrl}/downloads/${downloadId}/events`,
+			)
+
+			const progressUpdates: any[] = []
+
+			await new Promise((resolve, reject) => {
+				const timeout = setTimeout(() => {
+					eventSource.close()
+					reject(new Error('Timeout waiting for download completion'))
+				}, 10000)
+
+				eventSource.onmessage = (event) => {
+					const update = JSON.parse(event.data)
+					progressUpdates.push(update)
+
+					if (update.status === 'completed' || update.status === 'error') {
+						clearTimeout(timeout)
+						eventSource.close()
+						resolve(null)
+					}
+				}
+
+				eventSource.onerror = (error) => {
+					clearTimeout(timeout)
+					eventSource.close()
+					reject(error)
+				}
+			})
+
+			// Verify we received progress updates
+			expect(progressUpdates.length).toBeGreaterThan(0)
+
+			// Verify we got downloading status updates
+			const downloadingUpdates = progressUpdates.filter(
+				(u) => u.status === 'downloading',
+			)
+			expect(downloadingUpdates.length).toBeGreaterThan(0)
+
+			// Verify bytes downloaded increased
+			if (downloadingUpdates.length > 1) {
+				const firstUpdate = downloadingUpdates[0]
+				const lastUpdate = downloadingUpdates[downloadingUpdates.length - 1]
+				expect(lastUpdate.bytesDownloaded).toBeGreaterThan(
+					firstUpdate.bytesDownloaded,
+				)
+			}
+
+			// Verify final status is completed
+			const finalUpdate = progressUpdates[progressUpdates.length - 1]
+			expect(finalUpdate.status).toBe('completed')
+		}, 15000)
+
+		it('should update sender share status during download', async () => {
+			// Create a share
+			const createShareResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					mapId: 'custom',
+					receiverDeviceId,
+				}),
+			})
+			const shareData = await createShareResponse.json()
+			const { shareId, downloadUrls, estimatedSizeBytes } = shareData
+
+			// Connect to sender's SSE to monitor share status
+			const eventSource = new EventSource(
+				`${senderBaseUrl}/mapShares/${shareId}/events`,
+			)
+
+			const shareUpdates: any[] = []
+
+			const ssePromise = new Promise((resolve, reject) => {
+				const timeout = setTimeout(() => {
+					eventSource.close()
+					reject(new Error('Timeout waiting for share completion'))
+				}, 10000)
+
+				eventSource.onmessage = (event) => {
+					const update = JSON.parse(event.data)
+					shareUpdates.push(update)
+
+					if (update.status === 'completed' || update.status === 'error') {
+						clearTimeout(timeout)
+						eventSource.close()
+						resolve(null)
+					}
+				}
+
+				eventSource.onerror = (error) => {
+					clearTimeout(timeout)
+					eventSource.close()
+					reject(error)
+				}
+			})
+
+			// Start the download with localhost URL
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			await fetch(`${receiverBaseUrl}/downloads`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					senderDeviceId,
+					downloadUrls: testDownloadUrls,
+					shareId,
+					estimatedSizeBytes,
+				}),
+			})
+
+			// Wait for SSE updates
+			await ssePromise
+
+			// Verify we got share status updates
+			expect(shareUpdates.length).toBeGreaterThan(0)
+
+			// Verify final status is completed
+			const finalUpdate = shareUpdates[shareUpdates.length - 1]
+			expect(finalUpdate.status).toBe('completed')
+		}, 15000)
+	})
+
+	describe('Remote Device ID Validation', () => {
+		it('should reject access to share with wrong device ID (403)', async () => {
+			// Create a third device with different keys
+			const wrongKeyPair = SecretStreamAgent.keyPair()
+			const wrongDeviceId = z32.encode(wrongKeyPair.publicKey)
+
+			// Create a share for the correct receiver
+			const createShareResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					mapId: 'custom',
+					receiverDeviceId, // Share is for receiverDeviceId
+				}),
+			})
+			expect(createShareResponse.status).toBe(201)
+			const shareData = await createShareResponse.json()
+			const { shareId } = shareData
+
+			// Create a share for a different device and try to access it with receiver's credentials
+			const createShareResponse2 = await fetch(`${senderBaseUrl}/mapShares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					mapId: 'custom',
+					receiverDeviceId: wrongDeviceId, // Share is for wrongDeviceId
+				}),
+			})
+			const shareData2 = await createShareResponse2.json()
+			const { shareId: shareId2 } = shareData2
+
+			// Try to access with receiver's credentials (should fail)
+			const shareInfoUrl2 = `http://127.0.0.1:${senderRemotePort}/mapShares/${shareId2}`
+			const response2 = (await secretStreamFetch(shareInfoUrl2, {
+				dispatcher: new SecretStreamAgent({
+					keyPair: receiverKeyPair, // Using receiver's keypair
+					remotePublicKey: senderKeyPair.publicKey,
+				}),
+			})) as unknown as Response
+
+			// Should get 403 Forbidden because receiver is not the intended recipient
+			expect(response2.status).toBe(403)
+		})
+
+		it('should reject download request with wrong device ID (403)', async () => {
+			// Create a third device with different keys
+			const wrongKeyPair = SecretStreamAgent.keyPair()
+			const wrongDeviceId = z32.encode(wrongKeyPair.publicKey)
+
+			// Create a share for receiver
+			const createShareResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					mapId: 'custom',
+					receiverDeviceId: wrongDeviceId, // Share is for wrongDeviceId
+				}),
+			})
+			const shareData = await createShareResponse.json()
+			const { shareId, downloadUrls, estimatedSizeBytes } = shareData
+
+			// Try to download with receiver's credentials (wrong device)
+			const downloadUrl = `http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`
+
+			const response = (await secretStreamFetch(downloadUrl, {
+				dispatcher: new SecretStreamAgent({
+					keyPair: receiverKeyPair, // Using receiver's keypair
+					remotePublicKey: senderKeyPair.publicKey,
+				}),
+			})) as unknown as Response
+
+			// Should get 403 Forbidden
+			expect(response.status).toBe(403)
+		})
+
+		it('should allow access to share with correct device ID', async () => {
+			// Create a share for receiver
+			const createShareResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					mapId: 'custom',
+					receiverDeviceId, // Correct receiver
+				}),
+			})
+			const shareData = await createShareResponse.json()
+			const { shareId, downloadUrls } = shareData
+
+			// Access with correct credentials (receiver's device)
+			const shareInfoUrl = `http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}`
+			const response = (await secretStreamFetch(shareInfoUrl, {
+				dispatcher: new SecretStreamAgent({
+					keyPair: receiverKeyPair, // Using receiver's keypair
+					remotePublicKey: senderKeyPair.publicKey,
+				}),
+			})) as unknown as Response
+
+			// Should succeed
+			expect(response.status).toBe(200)
+			const shareInfo = await response.json()
+			expect(shareInfo.shareId).toBe(shareId)
+			expect(shareInfo.receiverDeviceId).toBe(receiverDeviceId)
+		})
+
+		it('should reject decline request with wrong device ID (403)', async () => {
+			// Create a third device
+			const wrongKeyPair = SecretStreamAgent.keyPair()
+			const wrongDeviceId = z32.encode(wrongKeyPair.publicKey)
+
+			// Create a share for wrongDeviceId
+			const createShareResponse = await fetch(`${senderBaseUrl}/mapShares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					mapId: 'custom',
+					receiverDeviceId: wrongDeviceId,
+				}),
+			})
+			const shareData = await createShareResponse.json()
+			const { shareId, downloadUrls } = shareData
+
+			// Try to decline with receiver's credentials (wrong device)
+			const declineUrl = `http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/decline`
+			const response = (await secretStreamFetch(declineUrl, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ reason: 'no-space' }),
+				dispatcher: new SecretStreamAgent({
+					keyPair: receiverKeyPair, // Using receiver's keypair
+					remotePublicKey: senderKeyPair.publicKey,
+				}),
+			})) as unknown as Response
+
+			// Should get 403 Forbidden
+			expect(response.status).toBe(403)
 		})
 	})
 })
