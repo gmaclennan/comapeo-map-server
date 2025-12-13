@@ -5,6 +5,7 @@ import { type AddressInfo } from 'node:net'
 import { createServerAdapter } from '@whatwg-node/server'
 import pDefer from 'p-defer'
 import { createServer as createSecretStreamServer } from 'secret-stream-http'
+import z32 from 'z32'
 
 import { Context } from './context.js'
 import { RootRouter } from './routes/root.js'
@@ -52,7 +53,9 @@ export function createServer({ keyPair, ...contextOptions }: ServerOptions) {
 		serverAdapter.requestListener(req, res, {
 			isLocalhost: false,
 			// @ts-expect-error - the types for this are too hard and making them work would not add any type safety.
-			remoteDeviceId: req.socket.remotePublicKey,
+			remoteDeviceId: req.socket.remotePublicKey
+				? z32.encode(req.socket.remotePublicKey)
+				: undefined,
 		})
 	})
 	const secretStreamServer = createSecretStreamServer(remoteHttpServer, {
