@@ -31,10 +31,10 @@ type ListenResult = {
 	remotePort: number
 }
 
-export function createServer({ keyPair, ...contextOptions }: ServerOptions) {
+export function createServer(options: ServerOptions) {
 	const deferredListen = pDefer<ListenResult>()
 	const context = new Context({
-		...contextOptions,
+		...options,
 		getRemotePort: async () => {
 			const listenOptions = await deferredListen.promise
 			return listenOptions.remotePort
@@ -59,7 +59,7 @@ export function createServer({ keyPair, ...contextOptions }: ServerOptions) {
 		})
 	})
 	const secretStreamServer = createSecretStreamServer(remoteHttpServer, {
-		keyPair,
+		keyPair: options.keyPair,
 	})
 
 	return {

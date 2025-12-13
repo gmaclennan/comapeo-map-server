@@ -62,7 +62,7 @@ export type DownloadStateUpdate = Extract<
 	{ status: 'downloading' | 'completed' | 'error' | 'canceled' }
 >
 
-export const DownloadUrls = T.Array(T.String({ format: 'url' }), {
+export const DownloadUrls = T.Array(T.String(), {
 	description: 'List of URLs to download the map data from',
 })
 export type DownloadUrls = Static<typeof DownloadUrls>
