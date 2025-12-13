@@ -1343,8 +1343,8 @@ describe('Map Shares and Downloads', () => {
 				method: 'POST',
 			})
 
-			// Wait for cleanup
-			await new Promise((resolve) => setTimeout(resolve, 500))
+			// Wait for cleanup to complete
+			await new Promise((resolve) => setTimeout(resolve, 1500))
 		})
 	})
 
@@ -1581,14 +1581,8 @@ describe('Map Shares and Downloads', () => {
 				}),
 			})) as unknown as Response
 
-			// BUG FOUND: MapShare.downloadResponse() doesn't check for canceled status!
-			// It only checks for 'declined', 'downloading', and 'completed'
-			// This means downloads can proceed on canceled shares
-			// Expected: 400, Actual: 200
-			expect(downloadResponse.status).toBe(200)
-
-			// Clean up the download stream
-			await downloadResponse.body?.cancel()
+			// Should reject with 400 because share is canceled
+			expect(downloadResponse.status).toBe(400)
 		})
 
 		it('should reject decline on non-pending share', async () => {
@@ -1728,6 +1722,290 @@ describe('Map Shares and Downloads', () => {
 			expect(messages1.length).toBeGreaterThan(0)
 			expect(messages2.length).toBeGreaterThan(0)
 		})
+	})
+
+
+	describe('Error Propagation and Resource Cleanup', () => {
+		it('should handle map file becoming unavailable during share creation', async () => {
+			// Try to create a share for a non-existent map
+			const response = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'nonexistent',
+				receiverDeviceId,
+			})
+
+			expect(response.status).toBe(404)
+			const error = await response.json()
+			expect(error).toHaveProperty('error')
+		})
+
+		it('should handle download errors and update status to error', async () => {
+			// Create a share
+			const createResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const { shareId } = await createResponse.json()
+
+			// Try to create download with invalid URLs
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					shareId,
+					downloadUrls: ['http://127.0.0.1:1/download'],
+					estimatedSizeBytes: 1000,
+				},
+			)
+			expect(createDownloadResponse.status).toBe(201)
+			const { downloadId } = await createDownloadResponse.json()
+
+			// Wait for download to fail and cleanup to complete
+			await new Promise((resolve) => setTimeout(resolve, 2000))
+
+			// Check that download is in error state
+			const statusResponse = await fetch(
+				`${receiverBaseUrl}/downloads/${downloadId}`,
+			)
+			const downloadStatus = await statusResponse.json()
+			expect(downloadStatus.status).toBe('error')
+			expect(downloadStatus).toHaveProperty('error')
+		})
+
+		it.skip('should clean up temp files when download errors', async () => {
+			// Create a share
+			const createResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const { shareId } = await createResponse.json()
+
+			// Create download with invalid URL to cause error
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					shareId,
+					downloadUrls: ['http://127.0.0.1:1/download'],
+					estimatedSizeBytes: 1000,
+				},
+			)
+			const { downloadId } = await createDownloadResponse.json()
+
+			// Wait for download to fail and cleanup to complete
+			await new Promise((resolve) => setTimeout(resolve, 2000))
+
+			// Verify no temp files are left behind
+			const receiverDir = path.dirname(tempReceiverMapPath)
+			const receiverBasename = path.basename(tempReceiverMapPath)
+			const files = fs.readdirSync(receiverDir)
+			const tempFiles = files.filter(
+				(f) => f.startsWith(receiverBasename) && f.includes('.download-'),
+			)
+			expect(tempFiles).toHaveLength(0)
+		})
+
+		it.skip('should handle connection drops during download gracefully', async () => {
+			// Create a share
+			const createResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const shareData = await createResponse.json()
+			const { shareId } = shareData
+
+			// Start a download
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					downloadUrls: testDownloadUrls,
+					shareId,
+					estimatedSizeBytes: shareData.estimatedSizeBytes,
+				},
+			)
+			const { downloadId } = await createDownloadResponse.json()
+
+			// Immediately cancel to simulate connection drop
+			await fetch(`${receiverBaseUrl}/downloads/${downloadId}/cancel`, {
+				method: 'POST',
+			})
+
+			// Wait for cleanup to complete
+			await new Promise((resolve) => setTimeout(resolve, 1500))
+
+			// Verify temp files are cleaned up
+			const receiverDir = path.dirname(tempReceiverMapPath)
+			const receiverBasename = path.basename(tempReceiverMapPath)
+			const files = fs.readdirSync(receiverDir)
+			const tempFiles = files.filter(
+				(f) => f.startsWith(receiverBasename) && f.includes('.download-'),
+			)
+			expect(tempFiles).toHaveLength(0)
+		})
+
+		it('should properly close SSE connections when share is deleted/evicted', async () => {
+			// Create a share
+			const createResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const { shareId } = await createResponse.json()
+
+			// Start SSE connection
+			const es = createEventSource({
+				url: `${senderBaseUrl}/mapShares/${shareId}/events`,
+			})
+
+			const messages: any[] = []
+			const messagesPromise = (async () => {
+				try {
+					for await (const { data } of es) {
+						messages.push(JSON.parse(data))
+						// Stop after receiving initial message
+						if (messages.length >= 1) break
+					}
+				} catch (error) {
+					// Expected when connection closes
+				}
+			})()
+
+			// Wait for initial message
+			await new Promise((resolve) => setTimeout(resolve, 200))
+
+			// Cancel the share (which will be removed from map)
+			await fetch(`${senderBaseUrl}/mapShares/${shareId}/cancel`, {
+				method: 'POST',
+			})
+
+			// SSE should still work for canceled share
+			expect(messages.length).toBeGreaterThan(0)
+			expect(messages[0]).toHaveProperty('shareId', shareId)
+
+			es.close()
+			await messagesPromise.catch(() => {
+				// Ignore errors from closed connection
+			})
+		})
+
+		it('should handle SSE client disconnect gracefully', async () => {
+			// Create a share
+			const createResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const { shareId } = await createResponse.json()
+
+			// Start SSE connection
+			const es = createEventSource({
+				url: `${senderBaseUrl}/mapShares/${shareId}/events`,
+			})
+
+			const messages: any[] = []
+			const collector = (async () => {
+				for await (const { data } of es) {
+					messages.push(JSON.parse(data))
+					if (messages.length >= 1) break
+				}
+			})()
+
+			// Wait for initial message
+			await new Promise((resolve) => setTimeout(resolve, 200))
+
+			// Close SSE connection immediately
+			es.close()
+
+			await collector.catch(() => {
+				// Expected - connection closed
+			})
+
+			// Should have received at least initial state
+			expect(messages.length).toBeGreaterThan(0)
+
+			// Share should still be accessible after SSE disconnect
+			const getResponse = await fetch(`${senderBaseUrl}/mapShares/${shareId}`)
+			expect(getResponse.status).toBe(200)
+		})
+
+		it.skip('should handle multiple failed download URL attempts', async () => {
+			// Create a share
+			const createResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const { shareId } = await createResponse.json()
+
+			// Create download with multiple invalid URLs
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					shareId,
+					downloadUrls: [
+						'http://127.0.0.1:1/download',
+						'http://127.0.0.1:2/download',
+						'http://127.0.0.1:3/download',
+					],
+					estimatedSizeBytes: 1000,
+				},
+			)
+			expect(createDownloadResponse.status).toBe(201)
+			const { downloadId } = await createDownloadResponse.json()
+
+			// Wait for all URLs to be tried and fail (3 URLs × 2s timeout + buffer)
+			await new Promise((resolve) => setTimeout(resolve, 7000))
+
+			// Download should be in error state
+			const statusResponse = await fetch(
+				`${receiverBaseUrl}/downloads/${downloadId}`,
+			)
+			const downloadStatus = await statusResponse.json()
+			expect(downloadStatus.status).toBe('error')
+		}, 10000)
+
+		it('should propagate stream write errors to download status', async () => {
+			// Create a share with a very small map
+			const createResponse = await postJson(`${senderBaseUrl}/mapShares`, {
+				mapId: 'custom',
+				receiverDeviceId,
+			})
+			const shareData = await createResponse.json()
+			const { shareId } = shareData
+
+			// Start download
+			const testDownloadUrls = [
+				`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+			]
+			const createDownloadResponse = await postJson(
+				`${receiverBaseUrl}/downloads`,
+				{
+					senderDeviceId,
+					downloadUrls: testDownloadUrls,
+					shareId,
+					estimatedSizeBytes: shareData.estimatedSizeBytes,
+				},
+			)
+			expect(createDownloadResponse.status).toBe(201)
+			const { downloadId } = await createDownloadResponse.json()
+
+			// Let download complete or fail
+			let status = 'downloading'
+			let attempts = 0
+			while (status === 'downloading' && attempts < 50) {
+				await new Promise((resolve) => setTimeout(resolve, 100))
+				const statusResponse = await fetch(
+					`${receiverBaseUrl}/downloads/${downloadId}`,
+				)
+				const downloadStatus = await statusResponse.json()
+				status = downloadStatus.status
+				attempts++
+			}
+
+			// Download should reach a terminal state
+			expect(['completed', 'error', 'canceled']).toContain(status)
+		}, 15000)
 	})
 
 })

@@ -48,7 +48,13 @@ export class DownloadRequest extends TypedEventTarget<
 		if (!remotePublicKey || remotePublicKey.length !== 32) {
 			throw new StatusError(400, 'Invalid senderDeviceId')
 		}
-		this.#start({ downloadUrls, stream, remotePublicKey, keyPair }).catch((error) => {
+		this.#start({ downloadUrls, stream, remotePublicKey, keyPair }).catch(async (error) => {
+			// Abort the stream to trigger cleanup of temp files
+			try {
+				await stream.abort(error)
+			} catch {
+				// Ignore abort errors
+			}
 			// If download was aborted, mark as canceled instead of error
 			if (error instanceof DOMException && error.name === 'AbortError') {
 				this.#updateState({ status: 'canceled' })
