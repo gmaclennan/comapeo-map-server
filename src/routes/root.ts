@@ -26,15 +26,17 @@ export function RootRouter({ base = '/' }, ctx: Context): RouterExternal {
 	const downloadsRouter = DownloadsRouter({ base: DOWNLOADS_BASE }, ctx)
 	const mapSharesRouter = MapSharesRouter({ base: MAP_SHARES_BASE }, ctx)
 
-	router.all(`${MAPS_BASE}*`, localhostOnly, (request) =>
-		mapsRouter.fetch(request),
+	router.all(`${MAPS_BASE}*`, localhostOnly, (request, context) =>
+		mapsRouter.fetch(request, context),
 	)
-	router.all(`${DOWNLOADS_BASE}*`, localhostOnly, (request) =>
-		downloadsRouter.fetch(request),
+	router.all(`${DOWNLOADS_BASE}*`, localhostOnly, (request, context) =>
+		downloadsRouter.fetch(request, context),
 	)
 	// Some map share routes are remote-accessible - localhostOnly is applied in
 	// the map shares router where needed
-	router.all(`${MAP_SHARES_BASE}*`, (request) => mapSharesRouter.fetch(request))
+	router.all(`${MAP_SHARES_BASE}*`, (request, context) =>
+		mapSharesRouter.fetch(request, context),
+	)
 
 	return router
 }
