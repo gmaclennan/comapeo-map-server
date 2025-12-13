@@ -156,7 +156,7 @@ describe('Map Shares and Downloads', () => {
 
 		senderServer = createServer({
 			keyPair: senderKeyPair,
-			defaultOnlineStyleUrl: 'https://example.com/style.json',
+			defaultOnlineStyleUrl: 'https://demotiles.maplibre.org/style.json',
 			customMapPath: `file://${tempSenderMapPath}`,
 			fallbackMapPath: `file://${fallbackMapPath}`,
 		})
@@ -180,7 +180,7 @@ describe('Map Shares and Downloads', () => {
 
 		receiverServer = createServer({
 			keyPair: receiverKeyPair,
-			defaultOnlineStyleUrl: 'https://example.com/style.json',
+			defaultOnlineStyleUrl: 'https://demotiles.maplibre.org/style.json',
 			customMapPath: `file://${tempReceiverMapPath}`,
 			fallbackMapPath: `file://${fallbackMapPath}`,
 		})

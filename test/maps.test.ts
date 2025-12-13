@@ -37,7 +37,7 @@ describe('Maps API', () => {
 
 		server = createServer({
 			keyPair,
-			defaultOnlineStyleUrl: 'https://example.com/style.json', // This will likely fail, which is expected
+			defaultOnlineStyleUrl: 'https://demotiles.maplibre.org/style.json',
 			customMapPath: `file://${tempCustomMapPath}`,
 			fallbackMapPath: `file://${fallbackMapPath}`,
 		})
@@ -257,5 +257,85 @@ describe('Maps API', () => {
 			// May return 404 (not found) or 500 (error reading from SMP)
 			expect([404, 500]).toContain(response.status)
 		})
+	})
+})
+
+describe('Online Style Fallback', () => {
+	let server: Awaited<ReturnType<typeof createServer>>
+	let baseUrl: string
+
+	beforeAll(async () => {
+		// Generate a keypair for the server
+		const keyPair = {
+			publicKey: randomBytes(32),
+			secretKey: randomBytes(32),
+		}
+
+		const fallbackMapPath = path.join(__dirname, 'fixtures', 'osm-bright-z6.smp')
+
+		// Create server with non-existent custom map path to test online fallback
+		server = createServer({
+			keyPair,
+			defaultOnlineStyleUrl: 'https://demotiles.maplibre.org/style.json',
+			customMapPath: 'file:///nonexistent/path/to/map.smp',
+			fallbackMapPath: `file://${fallbackMapPath}`,
+		})
+
+		const { localPort } = await server.listen({
+			localPort: 0,
+			remotePort: 0,
+		})
+
+		baseUrl = `http://127.0.0.1:${localPort}`
+	}, 30000)
+
+	it('should redirect to fallback when custom map does not exist', async () => {
+		// Request default map, which should redirect to online style or fallback since custom doesn't exist
+		const response = await fetch(`${baseUrl}/maps/default/style.json`, {
+			redirect: 'manual',
+		})
+		expect(response.status).toBe(302)
+		const location = response.headers.get('location')
+		expect(location).toBeTruthy()
+		// Should redirect to either online style or fallback map
+		expect(
+			location.includes('demotiles.maplibre.org') ||
+				location.includes('/maps/fallback/'),
+		).toBe(true)
+	}, 15000)
+
+	it('should serve online style through default map fallback', async () => {
+		// Follow the redirect to get the actual style
+		const response = await fetch(`${baseUrl}/maps/default/style.json`)
+		expect(response.status).toBe(200)
+		const style = await response.json()
+
+		// Verify it's the MapLibre demo tiles style
+		expect(style).toHaveProperty('version')
+		expect(style).toHaveProperty('sources')
+		expect(style).toHaveProperty('layers')
+		expect(style).toHaveProperty('name')
+	}, 15000)
+
+	it('should return 404 for custom map resources when map does not exist', async () => {
+		// Directly requesting custom map that doesn't exist should return 404
+		const response = await fetch(`${baseUrl}/maps/custom/style.json`)
+		expect(response.status).toBe(404)
+	})
+
+	it('should include CORS headers in redirect to online style', async () => {
+		const response = await fetch(`${baseUrl}/maps/default/style.json`, {
+			redirect: 'manual',
+		})
+		expect(response.headers.get('access-control-allow-origin')).toBe('*')
+		expect(response.headers.get('cache-control')).toBe('no-cache')
+	})
+
+	it('should still serve fallback map normally', async () => {
+		const response = await fetch(`${baseUrl}/maps/fallback/style.json`)
+		expect(response.status).toBe(200)
+		const style = await response.json()
+		expect(style).toHaveProperty('version')
+		expect(style).toHaveProperty('sources')
 	})
 })
