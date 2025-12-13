@@ -18,6 +18,10 @@ const { EventSource } = require('eventsource')
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
 /**
  * Get first non-loopback IPv4 address, or null if none found
  */
@@ -32,6 +36,116 @@ function getNonLoopbackIPv4(): string | null {
 		}
 	}
 	return null
+}
+
+/**
+ * Helper to make JSON POST requests
+ */
+async function postJSON(url: string, data: any) {
+	return fetch(url, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(data),
+	})
+}
+
+/**
+ * Helper to create a map share
+ */
+async function createShare(
+	baseUrl: string,
+	mapId: string,
+	receiverDeviceId: string,
+) {
+	const response = await postJSON(`${baseUrl}/mapShares`, {
+		mapId,
+		receiverDeviceId,
+	})
+	const data = await response.json()
+	return { response, ...data }
+}
+
+/**
+ * Helper to create a download
+ */
+async function createDownload(baseUrl: string, downloadData: any) {
+	const response = await postJSON(`${baseUrl}/downloads`, downloadData)
+	const data = await response.json()
+	return { response, ...data }
+}
+
+/**
+ * Helper to wait for a single SSE message
+ */
+async function waitForSSEMessage(
+	url: string,
+	timeoutMs: number = 5000,
+): Promise<any> {
+	const eventSource = new EventSource(url)
+
+	return new Promise((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			eventSource.close()
+			reject(new Error('Timeout waiting for SSE message'))
+		}, timeoutMs)
+
+		eventSource.onmessage = (event) => {
+			clearTimeout(timeout)
+			eventSource.close()
+			resolve(JSON.parse(event.data))
+		}
+
+		eventSource.onerror = (error) => {
+			clearTimeout(timeout)
+			eventSource.close()
+			reject(error)
+		}
+	})
+}
+
+/**
+ * Helper to collect multiple SSE messages until a condition is met
+ */
+async function collectSSEMessages(
+	url: string,
+	options: {
+		count?: number
+		timeoutMs?: number
+		until?: (messages: any[]) => boolean
+	} = {},
+): Promise<any[]> {
+	const { count, timeoutMs = 5000, until } = options
+	const eventSource = new EventSource(url)
+	const messages: any[] = []
+
+	return new Promise((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			eventSource.close()
+			reject(new Error('Timeout waiting for SSE messages'))
+		}, timeoutMs)
+
+		eventSource.onmessage = (event) => {
+			const data = JSON.parse(event.data)
+			messages.push(data)
+
+			// Check if we should stop collecting
+			const shouldStop =
+				(count !== undefined && messages.length >= count) ||
+				(until && until(messages))
+
+			if (shouldStop) {
+				clearTimeout(timeout)
+				eventSource.close()
+				resolve(messages)
+			}
+		}
+
+		eventSource.onerror = (error) => {
+			clearTimeout(timeout)
+			eventSource.close()
+			reject(error)
+		}
+	})
 }
 
 describe('Map Shares and Downloads', () => {
@@ -129,20 +243,13 @@ describe('Map Shares and Downloads', () => {
 		let shareId: string
 
 		it('should create a map share', async () => {
-			const response = await fetch(`${senderBaseUrl}/mapShares`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					mapId: 'custom',
-					receiverDeviceId,
-				}),
-			})
+			const share = await createShare(
+				senderBaseUrl,
+				'custom',
+				receiverDeviceId,
+			)
 
-			expect(response.status).toBe(201)
-			const share = await response.json()
-
+			expect(share.response.status).toBe(201)
 			expect(share).toHaveProperty('shareId')
 			expect(share).toHaveProperty('downloadUrls')
 			expect(share).toHaveProperty('receiverDeviceId', receiverDeviceId)
@@ -155,7 +262,7 @@ describe('Map Shares and Downloads', () => {
 			shareId = share.shareId
 
 			// Check Location header
-			const location = response.headers.get('location')
+			const location = share.response.headers.get('location')
 			expect(location).toContain(shareId)
 		})
 
@@ -170,20 +277,14 @@ describe('Map Shares and Downloads', () => {
 		})
 
 		it('should get a specific map share', async () => {
-			// First create a share
-			const createResponse = await fetch(`${senderBaseUrl}/mapShares`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					mapId: 'custom',
-					receiverDeviceId,
-				}),
-			})
-			const { shareId } = await createResponse.json()
+			// Create a share
+			const { shareId } = await createShare(
+				senderBaseUrl,
+				'custom',
+				receiverDeviceId,
+			)
 
-			// Then get it
+			// Get it
 			const response = await fetch(`${senderBaseUrl}/mapShares/${shareId}`)
 			expect(response.status).toBe(200)
 			const share = await response.json()
@@ -201,24 +302,16 @@ describe('Map Shares and Downloads', () => {
 
 		it('should cancel a map share', async () => {
 			// Create a share
-			const createResponse = await fetch(`${senderBaseUrl}/mapShares`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					mapId: 'custom',
-					receiverDeviceId,
-				}),
-			})
-			const { shareId } = await createResponse.json()
+			const { shareId } = await createShare(
+				senderBaseUrl,
+				'custom',
+				receiverDeviceId,
+			)
 
 			// Cancel it
 			const cancelResponse = await fetch(
 				`${senderBaseUrl}/mapShares/${shareId}/cancel`,
-				{
-					method: 'POST',
-				},
+				{ method: 'POST' },
 			)
 			expect(cancelResponse.status).toBe(204)
 
@@ -230,30 +323,16 @@ describe('Map Shares and Downloads', () => {
 
 		it('should decline a map share from receiver', async () => {
 			// Create a share
-			const createResponse = await fetch(`${senderBaseUrl}/mapShares`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					mapId: 'custom',
-					receiverDeviceId,
-				}),
-			})
-			const { shareId } = await createResponse.json()
+			const { shareId } = await createShare(
+				senderBaseUrl,
+				'custom',
+				receiverDeviceId,
+			)
 
 			// Decline it
-			const declineResponse = await fetch(
+			const declineResponse = await postJSON(
 				`${senderBaseUrl}/mapShares/${shareId}/decline`,
-				{
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json',
-					},
-					body: JSON.stringify({
-						reason: 'user_rejected',
-					}),
-				},
+				{ reason: 'user_rejected' },
 			)
 			expect(declineResponse.status).toBe(204)
 
@@ -267,31 +346,23 @@ describe('Map Shares and Downloads', () => {
 
 	describe('Downloads (Receiver)', () => {
 		it('should create a download request', async () => {
-			const response = await fetch(`${receiverBaseUrl}/downloads`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					senderDeviceId,
-					shareId: 'test-share-id',
-					downloadUrls: [
-						`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-id/download`,
-					],
-					estimatedSizeBytes: 1000000,
-				}),
+			const download = await createDownload(receiverBaseUrl, {
+				senderDeviceId,
+				shareId: 'test-share-id',
+				downloadUrls: [
+					`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-id/download`,
+				],
+				estimatedSizeBytes: 1000000,
 			})
 
-			expect(response.status).toBe(201)
-			const download = await response.json()
-
+			expect(download.response.status).toBe(201)
 			expect(download).toHaveProperty('downloadId')
 			expect(download).toHaveProperty('status', 'downloading')
 			expect(download).toHaveProperty('bytesDownloaded', 0)
 			expect(download).toHaveProperty('senderDeviceId', senderDeviceId)
 
 			// Check Location header
-			const location = response.headers.get('location')
+			const location = download.response.headers.get('location')
 			expect(location).toContain(download.downloadId)
 		})
 
@@ -305,21 +376,14 @@ describe('Map Shares and Downloads', () => {
 
 		it('should get a specific download', async () => {
 			// Create a download
-			const createResponse = await fetch(`${receiverBaseUrl}/downloads`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					senderDeviceId,
-					shareId: 'test-share-id-2',
-					downloadUrls: [
-						`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-id-2/download`,
-					],
-					estimatedSizeBytes: 1000000,
-				}),
+			const { downloadId } = await createDownload(receiverBaseUrl, {
+				senderDeviceId,
+				shareId: 'test-share-id-2',
+				downloadUrls: [
+					`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-id-2/download`,
+				],
+				estimatedSizeBytes: 1000000,
 			})
-			const { downloadId } = await createResponse.json()
 
 			// Get it
 			const response = await fetch(
@@ -340,28 +404,19 @@ describe('Map Shares and Downloads', () => {
 
 		it('should cancel a download', async () => {
 			// Create a download
-			const createResponse = await fetch(`${receiverBaseUrl}/downloads`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					senderDeviceId,
-					shareId: 'test-share-id-3',
-					downloadUrls: [
-						`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-id-3/download`,
-					],
-					estimatedSizeBytes: 1000000,
-				}),
+			const { downloadId } = await createDownload(receiverBaseUrl, {
+				senderDeviceId,
+				shareId: 'test-share-id-3',
+				downloadUrls: [
+					`http://${nonLoopbackIP || '192.168.1.100'}:${senderRemotePort}/mapShares/test-share-id-3/download`,
+				],
+				estimatedSizeBytes: 1000000,
 			})
-			const { downloadId } = await createResponse.json()
 
 			// Cancel it
 			const cancelResponse = await fetch(
 				`${receiverBaseUrl}/downloads/${downloadId}/cancel`,
-				{
-					method: 'POST',
-				},
+				{ method: 'POST' },
 			)
 			expect(cancelResponse.status).toBe(204)
 		})
@@ -478,42 +533,16 @@ describe('Map Shares and Downloads', () => {
 		describe('Map Share Events', () => {
 			it('should stream initial state when connecting to events endpoint', async () => {
 				// Create a share
-				const createResponse = await fetch(`${senderBaseUrl}/mapShares`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json',
-					},
-					body: JSON.stringify({
-						mapId: 'custom',
-						receiverDeviceId,
-					}),
-				})
-				const { shareId } = await createResponse.json()
-
-				// Connect to SSE endpoint
-				const eventSource = new EventSource(
-					`${senderBaseUrl}/mapShares/${shareId}/events`,
+				const { shareId } = await createShare(
+					senderBaseUrl,
+					'custom',
+					receiverDeviceId,
 				)
 
-				// Wait for initial message
-				const initialState = await new Promise((resolve, reject) => {
-					const timeout = setTimeout(() => {
-						eventSource.close()
-						reject(new Error('Timeout waiting for SSE message'))
-					}, 5000)
-
-					eventSource.onmessage = (event) => {
-						clearTimeout(timeout)
-						eventSource.close()
-						resolve(JSON.parse(event.data))
-					}
-
-					eventSource.onerror = (error) => {
-						clearTimeout(timeout)
-						eventSource.close()
-						reject(error)
-					}
-				})
+				// Wait for initial SSE message
+				const initialState = await waitForSSEMessage(
+					`${senderBaseUrl}/mapShares/${shareId}/events`,
+				)
 
 				expect(initialState).toHaveProperty('shareId', shareId)
 				expect(initialState).toHaveProperty('status', 'pending')
@@ -522,50 +551,17 @@ describe('Map Shares and Downloads', () => {
 
 			it('should stream state updates when share is cancelled', async () => {
 				// Create a share
-				const createResponse = await fetch(`${senderBaseUrl}/mapShares`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json',
-					},
-					body: JSON.stringify({
-						mapId: 'custom',
-						receiverDeviceId,
-					}),
-				})
-				const { shareId } = await createResponse.json()
-
-				// Connect to SSE endpoint
-				const eventSource = new EventSource(
-					`${senderBaseUrl}/mapShares/${shareId}/events`,
+				const { shareId } = await createShare(
+					senderBaseUrl,
+					'custom',
+					receiverDeviceId,
 				)
 
-				const messages: any[] = []
-
-				// Collect messages
-				const updatePromise = new Promise((resolve, reject) => {
-					const timeout = setTimeout(() => {
-						eventSource.close()
-						reject(new Error('Timeout waiting for update'))
-					}, 5000)
-
-					eventSource.onmessage = (event) => {
-						const data = JSON.parse(event.data)
-						messages.push(data)
-
-						// After receiving 2 messages (initial + update), resolve
-						if (messages.length >= 2) {
-							clearTimeout(timeout)
-							eventSource.close()
-							resolve(messages)
-						}
-					}
-
-					eventSource.onerror = (error) => {
-						clearTimeout(timeout)
-						eventSource.close()
-						reject(error)
-					}
-				})
+				// Start collecting messages (expect 2: initial + update)
+				const messagesPromise = collectSSEMessages(
+					`${senderBaseUrl}/mapShares/${shareId}/events`,
+					{ count: 2 },
+				)
 
 				// Wait for connection and initial message
 				await new Promise((resolve) => setTimeout(resolve, 100))
@@ -575,7 +571,7 @@ describe('Map Shares and Downloads', () => {
 					method: 'POST',
 				})
 
-				await updatePromise
+				const messages = await messagesPromise
 
 				// First message should be initial state (pending)
 				expect(messages[0]).toHaveProperty('status', 'pending')
