@@ -26,30 +26,32 @@ This server solves all three by embedding a lightweight HTTP server that speaks 
 
 ## Architecture
 
-The server runs two HTTP servers in parallel:
+The server listens on two different network interfaces:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Application (CoMapeo, etc)                    │
 │                                                                   │
-│  ┌─────────────────┐                   ┌──────────────────────┐ │
-│  │ Localhost Server│                   │  P2P Server          │ │
-│  │ (127.0.0.1)     │                   │  (0.0.0.0)           │ │
-│  │                 │                   │                      │ │
-│  │ • Map tiles     │                   │ • Encrypted sharing  │ │
-│  │ • Styles/glyphs │                   │ • Device-to-device   │ │
-│  │ • Map management│                   │ • No TLS required    │ │
-│  └─────────────────┘                   └──────────────────────┘ │
+│                      HTTP Map Server                             │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │                                                              ││
+│  │  Loopback (127.0.0.1)          All Interfaces (0.0.0.0)    ││
+│  │  • Map tiles                    • Noise protocol encrypted  ││
+│  │  • Styles/glyphs/sprites        • Public key authentication ││
+│  │  • Map management API           • Map sharing only          ││
+│  │  • Regular HTTP                 • Device-to-device          ││
+│  │                                                              ││
+│  └──────────────────────────────────────────────────────────────┘│
 │         ↑                                       ↑                │
 └─────────┼───────────────────────────────────────┼────────────────┘
           │                                       │
     MapLibre GL                              Other Devices
-    Your App Code                          (encrypted connection)
+    Your App Code                         (Noise encrypted streams)
 ```
 
-**Localhost Server**: Serves map tiles and provides a control API for your application
+**Loopback Interface** (127.0.0.1): Regular HTTP for your application to serve map tiles and control the server
 
-**P2P Server**: Uses [secret-stream-http](https://github.com/holepunchto/secret-stream-http) for end-to-end encrypted connections between devices without requiring TLS certificates
+**Network Interface** (0.0.0.0): Only accepts Noise protocol encrypted streams via [secret-stream-http](https://github.com/holepunchto/secret-stream-http). The public keys exchanged during the Noise handshake authenticate both client and server, eliminating the need for TLS certificates.
 
 ## Installation
 
@@ -83,14 +85,14 @@ const server = createServer({
 	},
 })
 
-// Start both servers
+// Start listening on both interfaces
 const { localPort, remotePort } = await server.listen({
-	localPort: 8080, // Optional: specify local API port
-	remotePort: 9090, // Optional: specify P2P port
+	localPort: 8080, // Optional: loopback interface port
+	remotePort: 9090, // Optional: network interface port
 })
 
 console.log(`Map tiles: http://127.0.0.1:${localPort}/maps/default/style.json`)
-console.log(`P2P sharing: listening on port ${remotePort}`)
+console.log(`P2P sharing: listening on 0.0.0.0:${remotePort} (Noise encrypted)`)
 ```
 
 ## Using Maps in MapLibre
@@ -456,10 +458,10 @@ yourApp.onMessage(async (message) => {
 ## Security Model
 
 - **Localhost API**: Only accessible from `127.0.0.1` - your application code
-- **P2P Connections**: Uses [secret-stream-http](https://github.com/holepunchto/secret-stream-http) for encrypted, authenticated connections
-- **No TLS Required**: Secret-stream provides end-to-end encryption without certificates
-- **Device Authentication**: Each share is tied to a specific receiver device ID (public key)
-- **Access Validation**: Remote requests are rejected unless the device's public key matches the share's `receiverDeviceId`
+- **Noise Protocol Encryption**: The network interface uses the [Noise protocol](http://www.noiseprotocol.org/) via [secret-stream-http](https://github.com/holepunchto/secret-stream-http)
+- **Public Key Authentication**: Client and server public keys from the Noise handshake are used to authenticate connections - no TLS certificates needed
+- **Device Authorization**: Each share is tied to a specific receiver device ID (public key)
+- **Access Validation**: Remote requests are rejected unless the authenticated client public key matches the share's `receiverDeviceId`
 
 ## Network Discovery
 
