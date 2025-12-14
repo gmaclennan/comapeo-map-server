@@ -34,39 +34,41 @@ type ListenResult = {
 
 export function createServer(options: ServerOptions) {
 	// Validate required parameters
-	if (!options.defaultOnlineStyleUrl) {
-		throw new TypeError('defaultOnlineStyleUrl is required')
-	}
-	if (!options.customMapPath) {
-		throw new TypeError('customMapPath is required')
-	}
-	if (!options.fallbackMapPath) {
-		throw new TypeError('fallbackMapPath is required')
-	}
+	assert(
+		options.defaultOnlineStyleUrl,
+		new TypeError('defaultOnlineStyleUrl is required'),
+	)
+	assert(options.customMapPath, new TypeError('customMapPath is required'))
+	assert(options.fallbackMapPath, new TypeError('fallbackMapPath is required'))
 
 	// Validate keyPair
-	if (!options.keyPair || typeof options.keyPair !== 'object') {
-		throw new TypeError('keyPair is required and must be an object')
-	}
-	if (!(options.keyPair.publicKey instanceof Uint8Array)) {
-		throw new TypeError('keyPair.publicKey must be a Uint8Array')
-	}
-	if (!(options.keyPair.secretKey instanceof Uint8Array)) {
-		throw new TypeError('keyPair.secretKey must be a Uint8Array')
-	}
+	assert(
+		options.keyPair && typeof options.keyPair === 'object',
+		new TypeError('keyPair is required and must be an object'),
+	)
+	assert(
+		options.keyPair.publicKey instanceof Uint8Array,
+		new TypeError('keyPair.publicKey must be a Uint8Array'),
+	)
+	assert(
+		options.keyPair.secretKey instanceof Uint8Array,
+		new TypeError('keyPair.secretKey must be a Uint8Array'),
+	)
 
 	// Support both 32-byte (Noise XX) and 64-byte (Hypercore/secret-stream) keys
 	const validKeySizes = [32, 64]
-	if (!validKeySizes.includes(options.keyPair.publicKey.length)) {
-		throw new TypeError(
+	assert(
+		validKeySizes.includes(options.keyPair.publicKey.length),
+		new TypeError(
 			`keyPair.publicKey must be 32 or 64 bytes, got ${options.keyPair.publicKey.length}`,
-		)
-	}
-	if (!validKeySizes.includes(options.keyPair.secretKey.length)) {
-		throw new TypeError(
+		),
+	)
+	assert(
+		validKeySizes.includes(options.keyPair.secretKey.length),
+		new TypeError(
 			`keyPair.secretKey must be 32 or 64 bytes, got ${options.keyPair.secretKey.length}`,
-		)
-	}
+		),
+	)
 
 	const deferredListen = pDefer<ListenResult>()
 	const context = new Context({
