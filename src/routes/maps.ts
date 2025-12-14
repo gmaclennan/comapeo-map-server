@@ -63,6 +63,17 @@ export function MapsRouter({ base = '/' }, ctx: Context) {
 		return new Response(null, { status: 200 })
 	})
 
+	router.delete<MapRequest>('/:mapId', async (request) => {
+		// Only allow deleting the custom map ID
+		if (request.params.mapId !== CUSTOM_MAP_ID) {
+			throw new StatusError(404, 'Map not found')
+		}
+		// Wait for any active uploads to complete before deleting
+		await activeUploads.get(request.params.mapId)?.catch(noop)
+		await ctx.deleteMap(request.params.mapId)
+		return new Response(null, { status: 204 })
+	})
+
 	router.all(`/:mapId/*`, async (request) => {
 		if (request.params.mapId === DEFAULT_MAP_ID) {
 			return defaultMapHandler(request)

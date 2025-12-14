@@ -133,6 +133,8 @@ export class Context {
 					return new Reader(mapFilePath)
 				})()
 				this.#mapReaders.set(mapId, readerPromise)
+				// Wait for the file copy to complete before closing the stream
+				await readerPromise
 			},
 			async abort(err) {
 				try {
@@ -142,5 +144,34 @@ export class Context {
 				}
 			},
 		})
+	}
+	/**
+	 * Deletes the map file for the specified map ID.
+	 * Closes any existing reader and removes it from the cache.
+	 *
+	 * @param mapId - The ID of the map to delete.
+	 */
+	async deleteMap(mapId: string) {
+		const mapFileUrl = this.#mapFileUrls.get(mapId)
+		if (!mapFileUrl) {
+			throw new StatusError(404, `Map ID not found: ${mapId}`)
+		}
+		// Close and remove the reader if it exists
+		const existingReaderPromise = this.#mapReaders.get(mapId)
+		if (existingReaderPromise) {
+			const existingReader = await existingReaderPromise
+			await existingReader.close().catch(noop)
+			this.#mapReaders.delete(mapId)
+		}
+		// Delete the map file
+		const mapFilePath = fileURLToPath(mapFileUrl)
+		try {
+			await fsPromises.unlink(mapFilePath)
+		} catch (err) {
+			if (getErrorCode(err) === 'ENOENT') {
+				throw new StatusError(404, 'Custom map not found')
+			}
+			throw err
+		}
 	}
 }

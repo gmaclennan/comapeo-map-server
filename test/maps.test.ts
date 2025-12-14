@@ -394,3 +394,217 @@ describe('Online Style Fallback', () => {
 		expect(style).toHaveProperty('sources')
 	})
 })
+
+describe('Map Lifecycle: Upload, Replace, and Delete', () => {
+	let server: Awaited<ReturnType<typeof createServer>>
+	let baseUrl: string
+	let tempCustomMapPath: string
+	let tempDir: string
+
+	beforeAll(async () => {
+		// Generate a keypair for the server
+		const keyPair = {
+			publicKey: randomBytes(32),
+			secretKey: randomBytes(32),
+		}
+
+		// Create temp directory for custom map
+		tempDir = path.join(os.tmpdir(), `map-lifecycle-test-${Date.now()}`)
+		fs.mkdirSync(tempDir, { recursive: true })
+		tempCustomMapPath = path.join(tempDir, 'custom.smp')
+
+		// Start without a custom map (file doesn't exist yet)
+		const fallbackMapPath = path.join(__dirname, 'fixtures', 'osm-bright-z6.smp')
+
+		server = createServer({
+			keyPair,
+			defaultOnlineStyleUrl: 'https://demotiles.maplibre.org/style.json',
+			customMapPath: `file://${tempCustomMapPath}`,
+			fallbackMapPath: `file://${fallbackMapPath}`,
+		})
+
+		const { localPort } = await server.listen({
+			localPort: 0,
+			remotePort: 0,
+		})
+
+		baseUrl = `http://127.0.0.1:${localPort}`
+	}, 30000)
+
+	afterAll(async () => {
+		// Clean up temp directory
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true })
+		} catch (err) {
+			// Ignore errors
+		}
+	})
+
+	it('should return 404 when custom map does not exist initially', async () => {
+		const response = await fetch(`${baseUrl}/maps/custom/style.json`)
+		expect(response.status).toBe(404)
+	})
+
+	it('should upload a custom map after server initialization', async () => {
+		const fixturePath = path.join(__dirname, 'fixtures', 'demotiles-z2.smp')
+		const fileBuffer = fs.readFileSync(fixturePath)
+
+		const response = await fetch(`${baseUrl}/maps/custom`, {
+			method: 'PUT',
+			body: fileBuffer,
+			headers: {
+				'Content-Type': 'application/octet-stream',
+			},
+		})
+
+		expect(response.status).toBe(200)
+
+		// Verify the file was written
+		expect(fs.existsSync(tempCustomMapPath)).toBe(true)
+	}, 30000)
+
+	it('should serve the newly uploaded custom map', async () => {
+		const response = await fetch(`${baseUrl}/maps/custom/style.json`)
+		expect(response.status).toBe(200)
+		const style = await response.json()
+		expect(style).toHaveProperty('version')
+		expect(style).toHaveProperty('sources')
+		expect(style).toHaveProperty('layers')
+	}, 10000)
+
+	it('should return map info for the uploaded custom map', async () => {
+		const response = await fetch(`${baseUrl}/maps/custom/info`)
+		expect(response.status).toBe(200)
+		const info = await response.json()
+		expect(info).toHaveProperty('name')
+		expect(info).toHaveProperty('size')
+		expect(info).toHaveProperty('created')
+		expect(info.size).toBeGreaterThan(0)
+	}, 10000)
+
+	it('should replace an existing custom map', async () => {
+		// Get the current map info
+		const infoResponse1 = await fetch(`${baseUrl}/maps/custom/info`)
+		const info1 = await infoResponse1.json()
+
+		// Upload a different map (osm-bright instead of demotiles)
+		const fixturePath = path.join(__dirname, 'fixtures', 'osm-bright-z6.smp')
+		const fileBuffer = fs.readFileSync(fixturePath)
+
+		const uploadResponse = await fetch(`${baseUrl}/maps/custom`, {
+			method: 'PUT',
+			body: fileBuffer,
+			headers: {
+				'Content-Type': 'application/octet-stream',
+			},
+		})
+
+		expect(uploadResponse.status).toBe(200)
+
+		// Verify the map was replaced by checking size changed
+		const infoResponse2 = await fetch(`${baseUrl}/maps/custom/info`)
+		const info2 = await infoResponse2.json()
+		expect(info2.size).not.toBe(info1.size)
+	}, 30000)
+
+	it('should serve the replaced custom map', async () => {
+		const response = await fetch(`${baseUrl}/maps/custom/style.json`)
+		expect(response.status).toBe(200)
+		const style = await response.json()
+		expect(style).toHaveProperty('version')
+		// Should now be osm-bright map
+		expect(style).toHaveProperty('sources')
+	}, 10000)
+
+	it('should delete the custom map', async () => {
+		const response = await fetch(`${baseUrl}/maps/custom`, {
+			method: 'DELETE',
+		})
+
+		expect(response.status).toBe(204)
+
+		// Verify the file was deleted
+		expect(fs.existsSync(tempCustomMapPath)).toBe(false)
+	})
+
+	it('should return 404 after custom map is deleted', async () => {
+		const response = await fetch(`${baseUrl}/maps/custom/style.json`)
+		expect(response.status).toBe(404)
+	})
+
+	it('should return 404 when trying to delete already deleted map', async () => {
+		const response = await fetch(`${baseUrl}/maps/custom`, {
+			method: 'DELETE',
+		})
+
+		expect(response.status).toBe(404)
+	})
+
+	it('should return 404 when trying to delete fallback map', async () => {
+		const response = await fetch(`${baseUrl}/maps/fallback`, {
+			method: 'DELETE',
+		})
+
+		expect(response.status).toBe(404)
+	})
+
+	it('should return 404 when trying to delete default map', async () => {
+		const response = await fetch(`${baseUrl}/maps/default`, {
+			method: 'DELETE',
+		})
+
+		expect(response.status).toBe(404)
+	})
+
+	it('should upload custom map again after deletion', async () => {
+		// Upload a map again to verify server state is correct
+		const fixturePath = path.join(__dirname, 'fixtures', 'demotiles-z2.smp')
+		const fileBuffer = fs.readFileSync(fixturePath)
+
+		const response = await fetch(`${baseUrl}/maps/custom`, {
+			method: 'PUT',
+			body: fileBuffer,
+			headers: {
+				'Content-Type': 'application/octet-stream',
+			},
+		})
+
+		expect(response.status).toBe(200)
+
+		// Verify it's accessible
+		const styleResponse = await fetch(`${baseUrl}/maps/custom/style.json`)
+		expect(styleResponse.status).toBe(200)
+	}, 30000)
+
+	it('should handle concurrent upload attempts gracefully', async () => {
+		const fixturePath = path.join(__dirname, 'fixtures', 'demotiles-z2.smp')
+		const fileBuffer = fs.readFileSync(fixturePath)
+
+		// Start two concurrent uploads
+		const upload1 = fetch(`${baseUrl}/maps/custom`, {
+			method: 'PUT',
+			body: fileBuffer,
+			headers: {
+				'Content-Type': 'application/octet-stream',
+			},
+		})
+
+		const upload2 = fetch(`${baseUrl}/maps/custom`, {
+			method: 'PUT',
+			body: fileBuffer,
+			headers: {
+				'Content-Type': 'application/octet-stream',
+			},
+		})
+
+		const [response1, response2] = await Promise.all([upload1, upload2])
+
+		// Both should succeed (one waits for the other)
+		expect(response1.status).toBe(200)
+		expect(response2.status).toBe(200)
+
+		// Verify map is in a good state
+		const styleResponse = await fetch(`${baseUrl}/maps/custom/style.json`)
+		expect(styleResponse.status).toBe(200)
+	}, 30000)
+})
