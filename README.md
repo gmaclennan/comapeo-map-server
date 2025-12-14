@@ -1,40 +1,55 @@
 # @comapeo/map-server
 
-An embedded HTTP server for peer-to-peer (P2P) map sharing on local networks. Designed to run within applications to enable encrypted, direct device-to-device transfer of offline map data.
+A lightweight embedded map tile server for serving offline vector maps in desktop and mobile applications. Designed primarily for [CoMapeo](https://comapeo.app/), an offline-first mapping tool built for Indigenous communities and land defenders to document and monitor their territories.
+
+## What It Does
+
+This server provides everything needed to display offline vector maps in [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/) and compatible libraries:
+
+- **Vector tile serving** - Delivers map tiles on demand
+- **MapLibre style.json** - Provides the style specification
+- **Glyphs (fonts)** - Serves text rendering resources
+- **Sprites** - Delivers map icons and symbols
+- **P2P map sharing** - Securely share offline maps between devices on a local network
+
+All map resources are served from [Styled Map Package (SMP)](https://github.com/digidem/styled-map-package) files - a zip-based format containing everything needed for a complete offline map.
+
+## Why This Exists
+
+CoMapeo and similar offline mapping applications need to:
+
+1. **Serve maps offline** - Display vector maps without internet connectivity
+2. **Run embedded** - Operate within desktop and mobile apps (Electron, React Native, etc.)
+3. **Share maps locally** - Transfer large map files between devices on the same network without internet
+
+This server solves all three by embedding a lightweight HTTP server that speaks the MapLibre/Mapbox protocol and adds encrypted peer-to-peer map sharing.
 
 ## Architecture
 
-The server runs two HTTP servers simultaneously:
-
-1. **Local Server** (localhost only) - Provides a control API for the embedding application
-2. **Remote Server** (network accessible) - Enables P2P communication with other devices using encrypted connections
+The server runs two HTTP servers in parallel:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                       Application Process                        │
+│                    Application (CoMapeo, etc)                    │
 │                                                                   │
-│  ┌────────────────┐                    ┌─────────────────────┐  │
-│  │ Local Server   │                    │  Remote Server      │  │
-│  │ (127.0.0.1)    │                    │  (0.0.0.0)          │  │
-│  │                │                    │                     │  │
-│  │ Control API    │                    │  P2P API            │  │
-│  │ - Create share │                    │  - Download maps    │  │
-│  │ - Start download│                   │  - Decline shares   │  │
-│  │ - Monitor status│                   │  (Encrypted)        │  │
-│  └────────────────┘                    └─────────────────────┘  │
+│  ┌─────────────────┐                   ┌──────────────────────┐ │
+│  │ Localhost Server│                   │  P2P Server          │ │
+│  │ (127.0.0.1)     │                   │  (0.0.0.0)           │ │
+│  │                 │                   │                      │ │
+│  │ • Map tiles     │                   │ • Encrypted sharing  │ │
+│  │ • Styles/glyphs │                   │ • Device-to-device   │ │
+│  │ • Map management│                   │ • No TLS required    │ │
+│  └─────────────────┘                   └──────────────────────┘ │
 │         ↑                                       ↑                │
 └─────────┼───────────────────────────────────────┼────────────────┘
           │                                       │
-    Your App Code                          Other Devices
-                                           (via secret-stream)
+    MapLibre GL                              Other Devices
+    Your App Code                          (encrypted connection)
 ```
 
-### Security Model
+**Localhost Server**: Serves map tiles and provides a control API for your application
 
-- **Local API**: Only accessible from localhost (127.0.0.1)
-- **Remote API**: Uses [secret-stream-http](https://github.com/holepunchto/secret-stream-http) for end-to-end encrypted connections
-- **Device Authentication**: Each device has a keypair; remote access is validated against the intended receiver's device ID
-- **Share-specific Access**: Each map share is tied to a specific receiver device ID
+**P2P Server**: Uses [secret-stream-http](https://github.com/holepunchto/secret-stream-http) for end-to-end encrypted connections between devices without requiring TLS certificates
 
 ## Installation
 
@@ -42,25 +57,23 @@ The server runs two HTTP servers simultaneously:
 npm install @comapeo/map-server
 ```
 
-## Usage
-
-### Creating a Server
+## Quick Start
 
 ```javascript
 import { createServer } from '@comapeo/map-server'
 import Hypercore from 'hypercore'
 
-// Generate a keypair for this device (you should persist this)
+// Generate a keypair for this device (persist this!)
 const keyPair = Hypercore.keyPair()
 
 const server = createServer({
-	// URL for online map tiles (fallback when no custom map is available)
+	// Fallback for when offline maps aren't available
 	defaultOnlineStyleUrl: 'https://demotiles.maplibre.org/style.json',
 
-	// Path to the custom map file (styled-map-package format)
+	// Path to your custom offline map (SMP format)
 	customMapPath: 'file:///path/to/custom-map.smp',
 
-	// Path to the fallback offline map
+	// Path to bundled fallback map
 	fallbackMapPath: 'file:///path/to/fallback-map.smp',
 
 	// Device keypair for encrypted P2P connections
@@ -76,25 +89,108 @@ const { localPort, remotePort } = await server.listen({
 	remotePort: 9090, // Optional: specify P2P port
 })
 
-console.log(`Local API: http://127.0.0.1:${localPort}`)
-console.log(`P2P Server: listening on port ${remotePort}`)
+console.log(`Map tiles: http://127.0.0.1:${localPort}/maps/default/style.json`)
+console.log(`P2P sharing: listening on port ${remotePort}`)
 ```
+
+## Using Maps in MapLibre
+
+Once the server is running, configure MapLibre to use it:
+
+```javascript
+import maplibregl from 'maplibre-gl'
+
+const map = new maplibregl.Map({
+	container: 'map',
+	style: 'http://127.0.0.1:8080/maps/default/style.json',
+	center: [0, 0],
+	zoom: 2,
+})
+```
+
+The `default` map ID provides intelligent fallback:
+
+1. Tries to serve the custom map
+2. Falls back to the online style URL (if network available)
+3. Falls back to the bundled offline map
+
+## Map Format: Styled Map Package (SMP)
+
+SMP files are zip archives containing all resources for a complete offline map:
+
+- Vector or raster tiles
+- MapLibre style.json
+- Glyphs (font files for text rendering)
+- Sprite images and metadata (map icons)
+
+**Creating SMP files:**
+
+- [SMP Downloader](https://styled-map-package.fly.dev/) - Web-based tool
+- [styled-map-package](https://github.com/digidem/styled-map-package) - CLI utilities
+- [mapgl-tile-renderer](https://github.com/ConservationMetrics/mapgl-tile-renderer) - Generate styled raster tiles
 
 ## API Reference
 
-### Local API (Localhost Only)
+### Map Tile API (Localhost Only)
 
-Base URL: `http://127.0.0.1:{localPort}`
+All endpoints are prefixed with `http://127.0.0.1:{localPort}`
 
-#### Maps
+#### Get Map Style
 
-##### Get Map Info
+```http
+GET /maps/{mapId}/style.json
+```
+
+Returns the MapLibre style specification. Use this as the `style` URL in MapLibre.
+
+**Map IDs:**
+
+- `default` - Intelligent fallback (custom → online → fallback)
+- `custom` - Your uploaded custom map
+- `fallback` - Bundled offline map
+
+#### Get Tiles
+
+```http
+GET /maps/{mapId}/{z}/{x}/{y}.{format}
+```
+
+Standard slippy map tile endpoint. Format is usually `pbf` for vector tiles or `png`/`jpg` for raster.
+
+#### Get Glyphs (Fonts)
+
+```http
+GET /maps/{mapId}/glyphs/{fontstack}/{range}.pbf
+```
+
+Serves font glyphs for text rendering.
+
+#### Get Sprites (Icons)
+
+```http
+GET /maps/{mapId}/sprites/{spriteId}{scale}.{format}
+```
+
+Serves sprite images and metadata for map icons.
+
+#### Upload Custom Map
+
+```http
+PUT /maps/custom
+Content-Type: application/octet-stream
+
+[binary SMP file data]
+```
+
+Uploads a new custom map. The map becomes immediately available at `/maps/custom/`.
+
+#### Get Map Info
 
 ```http
 GET /maps/{mapId}/info
 ```
 
-Returns metadata about a map.
+Returns metadata about the map.
 
 **Response:**
 
@@ -106,33 +202,11 @@ Returns metadata about a map.
 }
 ```
 
-##### Upload Custom Map
+### P2P Map Sharing API
 
-```http
-PUT /maps/custom
-Content-Type: application/octet-stream
+The sharing API allows devices on the same local network to securely transfer SMP files.
 
-[binary map data]
-```
-
-Uploads a new custom map (styled-map-package format).
-
-##### Serve Map Tiles
-
-```http
-GET /maps/{mapId}/{z}/{x}/{y}.{format}
-GET /maps/{mapId}/style.json
-```
-
-Standard map tile and style endpoints. The `default` map ID provides intelligent fallback:
-
-1. Try custom map
-2. Try online style
-3. Fall back to bundled offline map
-
-#### Map Shares
-
-##### Create Map Share
+#### Creating a Share (Sender)
 
 ```http
 POST /mapShares
@@ -140,11 +214,11 @@ Content-Type: application/json
 
 {
   "mapId": "custom",
-  "receiverDeviceId": "z32-encoded-public-key-of-receiver"
+  "receiverDeviceId": "kmx8sejfn..." // z32-encoded public key
 }
 ```
 
-Creates a new map share offer for a specific device.
+Creates a share offer for a specific device.
 
 **Response (201):**
 
@@ -166,23 +240,9 @@ Creates a new map share offer for a specific device.
 }
 ```
 
-##### List Map Shares
+The `downloadUrls` contain all local IP addresses of the sender. The receiver tries each until one succeeds.
 
-```http
-GET /mapShares
-```
-
-Returns array of all active map shares.
-
-##### Get Map Share Status
-
-```http
-GET /mapShares/{shareId}
-```
-
-Returns current state of a specific share.
-
-##### Monitor Share Events (SSE)
+#### Monitor Share Progress (Sender)
 
 ```http
 GET /mapShares/{shareId}/events
@@ -191,121 +251,68 @@ Accept: text/event-stream
 
 Server-Sent Events stream for real-time status updates.
 
-**Event data:**
+**Statuses:**
 
-```json
-{
-  "shareId": "abc123...",
-  "status": "downloading",
-  "bytesDownloaded": 1234567,
-  ...
-}
-```
-
-**Possible statuses:**
-
-- `pending` - Awaiting response from receiver
-- `downloading` - Receiver is downloading
-- `completed` - Download finished
+- `pending` - Awaiting receiver response
+- `downloading` - Receiver is downloading (includes `bytesDownloaded`)
+- `completed` - Transfer finished
 - `declined` - Receiver declined (includes `reason`)
 - `canceled` - Sender canceled
-- `error` - Error occurred (includes `error`)
+- `error` - Transfer failed (includes `error`)
 
-##### Cancel Map Share
+#### Cancel Share (Sender)
 
 ```http
 POST /mapShares/{shareId}/cancel
 ```
 
-Cancels an active share. Returns 204 No Content.
+Returns 204 No Content.
 
-#### Downloads
-
-##### Start Download
+#### Starting a Download (Receiver)
 
 ```http
 POST /downloads
 Content-Type: application/json
 
 {
-  "senderDeviceId": "z32-encoded-public-key-of-sender",
+  "senderDeviceId": "z32-encoded-public-key",
   "shareId": "abc123...",
-  "downloadUrls": [
-    "http://192.168.1.100:9090/mapShares/abc123.../download"
-  ],
+  "downloadUrls": ["http://192.168.1.100:9090/mapShares/abc123.../download"],
   "estimatedSizeBytes": 12345678
 }
 ```
 
-Starts downloading a map from a sender.
+Starts downloading a shared map.
 
 **Response (201):**
 
 ```json
 {
 	"downloadId": "xyz789...",
-	"senderDeviceId": "kmx8sejfn...",
-	"shareId": "abc123...",
 	"status": "downloading",
 	"bytesDownloaded": 0,
 	"estimatedSizeBytes": 12345678
 }
 ```
 
-##### List Downloads
-
-```http
-GET /downloads
-```
-
-Returns array of all downloads.
-
-##### Get Download Status
-
-```http
-GET /downloads/{downloadId}
-```
-
-Returns current state of a specific download.
-
-##### Monitor Download Events (SSE)
+#### Monitor Download Progress (Receiver)
 
 ```http
 GET /downloads/{downloadId}/events
 Accept: text/event-stream
 ```
 
-Server-Sent Events stream for real-time download progress.
+Real-time download progress via Server-Sent Events.
 
-##### Cancel Download
+#### Cancel Download (Receiver)
 
 ```http
 POST /downloads/{downloadId}/cancel
 ```
 
-Cancels an active download. Returns 204 No Content.
+Returns 204 No Content.
 
-### Remote API (P2P Network)
-
-These endpoints are accessed by other devices over the encrypted P2P connection. They require the requesting device's public key to match the `receiverDeviceId` of the share.
-
-##### Get Map Share
-
-```http
-GET /mapShares/{shareId}
-```
-
-Allows receiver to view share details.
-
-##### Download Map Data
-
-```http
-GET /mapShares/{shareId}/download
-```
-
-Streams the map file to the receiver. This is the URL provided in `downloadUrls`.
-
-##### Decline Map Share
+#### Decline Share (Receiver)
 
 ```http
 POST /mapShares/{shareId}/decline
@@ -316,9 +323,9 @@ Content-Type: application/json
 }
 ```
 
-Receiver declines the map share.
+Accessed via the P2P server (remote connection).
 
-## Example: Sharing a Map Between Two Devices
+## Complete Example: Sharing Between Two Devices
 
 ### Device A (Sender)
 
@@ -327,11 +334,7 @@ import { createServer } from '@comapeo/map-server'
 import Hypercore from 'hypercore'
 import z32 from 'z32'
 
-// Device A's keypair
 const deviceAKeyPair = Hypercore.keyPair()
-const deviceAId = z32.encode(deviceAKeyPair.publicKey)
-
-// Start server
 const serverA = createServer({
 	defaultOnlineStyleUrl: 'https://demotiles.maplibre.org/style.json',
 	customMapPath: 'file:///maps/my-map.smp',
@@ -339,13 +342,13 @@ const serverA = createServer({
 	keyPair: deviceAKeyPair,
 })
 
-const { localPort: localA } = await serverA.listen()
+const { localPort } = await serverA.listen()
 
-// Device B's public key (received via your app's discovery mechanism)
-const deviceBId = 'kmx8sejfn...' // z32-encoded public key
+// Device B's public key (exchanged via your discovery mechanism)
+const deviceBId = 'kmx8sejfn...' // z32-encoded
 
-// Create a share for Device B
-const shareResponse = await fetch(`http://127.0.0.1:${localA}/mapShares`, {
+// Create share
+const res = await fetch(`http://127.0.0.1:${localPort}/mapShares`, {
 	method: 'POST',
 	headers: { 'Content-Type': 'application/json' },
 	body: JSON.stringify({
@@ -354,32 +357,28 @@ const shareResponse = await fetch(`http://127.0.0.1:${localA}/mapShares`, {
 	}),
 })
 
-const share = await shareResponse.json()
-console.log('Share created:', share.shareId)
-console.log('Download URLs:', share.downloadUrls)
+const share = await res.json()
 
-// Send share details to Device B via your app's messaging system
-await yourApp.sendMessage(deviceBId, {
+// Send share offer to Device B via your messaging layer
+await yourApp.sendToDevice(deviceBId, {
 	type: 'map-share-offer',
 	share,
 })
 
-// Monitor share progress
+// Monitor progress
 const eventSource = new EventSource(
-	`http://127.0.0.1:${localA}/mapShares/${share.shareId}/events`,
+	`http://127.0.0.1:${localPort}/mapShares/${share.shareId}/events`,
 )
 
 eventSource.onmessage = (event) => {
 	const state = JSON.parse(event.data)
-	console.log('Share status:', state.status)
-
 	if (state.status === 'downloading') {
-		const progress = (state.bytesDownloaded / state.estimatedSizeBytes) * 100
-		console.log(`Download progress: ${progress.toFixed(1)}%`)
+		console.log(
+			`Progress: ${((state.bytesDownloaded / state.estimatedSizeBytes) * 100).toFixed(1)}%`,
+		)
 	}
-
 	if (state.status === 'completed') {
-		console.log('Download completed!')
+		console.log('Transfer complete!')
 		eventSource.close()
 	}
 }
@@ -390,13 +389,8 @@ eventSource.onmessage = (event) => {
 ```javascript
 import { createServer } from '@comapeo/map-server'
 import Hypercore from 'hypercore'
-import z32 from 'z32'
 
-// Device B's keypair
 const deviceBKeyPair = Hypercore.keyPair()
-const deviceBId = z32.encode(deviceBKeyPair.publicKey)
-
-// Start server
 const serverB = createServer({
 	defaultOnlineStyleUrl: 'https://demotiles.maplibre.org/style.json',
 	customMapPath: 'file:///maps/my-map.smp',
@@ -404,95 +398,105 @@ const serverB = createServer({
 	keyPair: deviceBKeyPair,
 })
 
-const { localPort: localB } = await serverB.listen()
+const { localPort } = await serverB.listen()
 
-// Receive share offer from Device A (via your app's messaging)
+// Receive share offer from Device A
 yourApp.onMessage(async (message) => {
-	if (message.type === 'map-share-offer') {
-		const { share } = message
+	if (message.type !== 'map-share-offer') return
 
-		// Ask user if they want to accept
-		const userAccepts = await showUserPrompt(
-			`Accept map "${share.mapName}"? (${formatBytes(share.estimatedSizeBytes)})`,
-		)
+	const { share } = message
 
-		if (!userAccepts) {
-			// Decline the share
-			await fetch(`${share.downloadUrls[0].replace('/download', '/decline')}`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ reason: 'user_rejected' }),
-			})
-			return
+	// Ask user
+	const accept = await askUser(
+		`Accept "${share.mapName}"? (${formatBytes(share.estimatedSizeBytes)})`,
+	)
+
+	if (!accept) {
+		// Decline via P2P connection
+		await fetch(`${share.downloadUrls[0].replace('/download', '/decline')}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ reason: 'user_rejected' }),
+		})
+		return
+	}
+
+	// Start download
+	const res = await fetch(`http://127.0.0.1:${localPort}/downloads`, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({
+			senderDeviceId: message.senderDeviceId,
+			shareId: share.shareId,
+			downloadUrls: share.downloadUrls,
+			estimatedSizeBytes: share.estimatedSizeBytes,
+		}),
+	})
+
+	const download = await res.json()
+
+	// Monitor download
+	const es = new EventSource(
+		`http://127.0.0.1:${localPort}/downloads/${download.downloadId}/events`,
+	)
+
+	es.onmessage = (event) => {
+		const state = JSON.parse(event.data)
+		if (state.status === 'downloading') {
+			updateUI((state.bytesDownloaded / state.estimatedSizeBytes) * 100)
 		}
-
-		// Start download
-		const downloadResponse = await fetch(
-			`http://127.0.0.1:${localB}/downloads`,
-			{
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					senderDeviceId: z32.encode(share.downloadUrls[0]), // Extract from share
-					shareId: share.shareId,
-					downloadUrls: share.downloadUrls,
-					estimatedSizeBytes: share.estimatedSizeBytes,
-				}),
-			},
-		)
-
-		const download = await downloadResponse.json()
-		console.log('Download started:', download.downloadId)
-
-		// Monitor download progress
-		const eventSource = new EventSource(
-			`http://127.0.0.1:${localB}/downloads/${download.downloadId}/events`,
-		)
-
-		eventSource.onmessage = (event) => {
-			const state = JSON.parse(event.data)
-
-			if (state.status === 'downloading') {
-				const progress =
-					(state.bytesDownloaded / state.estimatedSizeBytes) * 100
-				updateProgressBar(progress)
-			}
-
-			if (state.status === 'completed') {
-				console.log('Map downloaded successfully!')
-				eventSource.close()
-
-				// Map is now available at /maps/custom/
-			}
-
-			if (state.status === 'error') {
-				console.error('Download failed:', state.error)
-				eventSource.close()
-			}
+		if (state.status === 'completed') {
+			console.log('Map ready! Available at /maps/custom/')
+			es.close()
 		}
 	}
 })
 ```
 
+## Security Model
+
+- **Localhost API**: Only accessible from `127.0.0.1` - your application code
+- **P2P Connections**: Uses [secret-stream-http](https://github.com/holepunchto/secret-stream-http) for encrypted, authenticated connections
+- **No TLS Required**: Secret-stream provides end-to-end encryption without certificates
+- **Device Authentication**: Each share is tied to a specific receiver device ID (public key)
+- **Access Validation**: Remote requests are rejected unless the device's public key matches the share's `receiverDeviceId`
+
 ## Network Discovery
 
-This library does not handle network discovery or peer finding. You'll need to implement that separately using technologies like:
+This library **does not** handle peer discovery. You need to implement that separately:
 
-- **mDNS/Bonjour** - For local network discovery
-- **Hyperswarm** - For DHT-based peer discovery
-- **Manual IP entry** - Let users manually enter IP addresses
+- **mDNS/Bonjour** - Discover devices on local network
+- **Hyperswarm** - DHT-based peer discovery
+- **QR codes** - Scan to exchange device IDs and IP addresses
+- **Manual entry** - Let users type IP addresses
 
-The sender provides `downloadUrls` with all their local IP addresses, and the receiver will try each one until a connection succeeds.
+The sender provides all their local IP addresses in `downloadUrls`. The receiver tries each until one connects.
 
-## Map Format
+## Use Cases
 
-Maps must be in the [styled-map-package](https://github.com/digidem/styled-map-package) format, which is a single-file package containing:
+- **CoMapeo** - Offline mapping for Indigenous communities and land defenders
+- **Field data collection** - ODK, Kobo Collect, Terrastories
+- **Offline navigation** - Apps needing offline vector maps
+- **Emergency response** - Maps in areas with poor/no connectivity
+- **Research expeditions** - Scientific fieldwork in remote areas
 
-- Vector tiles
-- Sprites
-- Fonts
-- MapLibre GL style definition
+## Related Projects
+
+- [CoMapeo](https://comapeo.app/) - Offline-first mapping for territorial monitoring
+- [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/) - Open-source vector map rendering
+- [Styled Map Package](https://github.com/digidem/styled-map-package) - SMP format specification
+- [secret-stream-http](https://github.com/holepunchto/secret-stream-http) - Encrypted HTTP over TCP
 
 ## License
 
 MIT
+
+---
+
+**Sources:**
+
+- [CoMapeo: Introducing CoMapeo](https://awana.digital/blog/introducing-comapeo----a-next-gen-territorial-monitoring-mapping-collaboration-tool)
+- [MapLibre GL JS Documentation](https://maplibre.org/maplibre-gl-js/docs/)
+- [Styled Map Package on GitHub](https://github.com/digidem/styled-map-package)
+- [SMP Downloader Tool](https://styled-map-package.fly.dev/)
+- [MapGL Tile Renderer](https://github.com/ConservationMetrics/mapgl-tile-renderer)
