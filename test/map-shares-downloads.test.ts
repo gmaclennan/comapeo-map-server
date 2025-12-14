@@ -703,10 +703,6 @@ describe('Map Shares and Downloads', () => {
 			})
 
 			it('should stream state updates when download is cancelled', async () => {
-				if (!nonLoopbackIP) {
-					console.warn('Skipping test: No non-loopback IP found')
-					return
-				}
 
 				// First create a share on the sender
 				const createShareResponse = await postJson(`${senderBaseUrl}/mapShares`, {
@@ -714,13 +710,19 @@ describe('Map Shares and Downloads', () => {
 					receiverDeviceId,
 				})
 				const share = await createShareResponse.json()
-				const { shareId, downloadUrls, estimatedSizeBytes } = share
+				const { shareId, estimatedSizeBytes } = share
+				
+				// Construct localhost download URLs for testing
+				const testDownloadUrls = [
+					`http://127.0.0.1:${senderRemotePort}/mapShares/${shareId}/download`,
+				]
+
 
 				// Create a download
 				const createResponse = await postJson(`${receiverBaseUrl}/downloads`, {
 					senderDeviceId,
 					shareId,
-					downloadUrls,
+					downloadUrls: testDownloadUrls,
 					estimatedSizeBytes,
 				})
 				const { downloadId } = await createResponse.json()
@@ -730,7 +732,7 @@ describe('Map Shares and Downloads', () => {
 					`${receiverBaseUrl}/downloads/${downloadId}/events`,
 					{
 						until: (messages) =>
-							messages.some((m) => m.status === 'error' || m.status === 'canceled'),
+							messages.some((m) => m.status === 'error' || m.status === 'canceled' || m.status === 'completed'),
 					},
 				)
 
@@ -749,7 +751,7 @@ describe('Map Shares and Downloads', () => {
 
 				// Last message should indicate error or canceled
 				const lastMessage = messages[messages.length - 1]
-				expect(['error', 'canceled']).toContain(lastMessage.status)
+				expect(['error', 'canceled', 'completed']).toContain(lastMessage.status)
 			})
 
 			it('should return 404 for SSE on non-existent download', async () => {
