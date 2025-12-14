@@ -116,6 +116,44 @@ The `default` map ID provides intelligent fallback:
 2. Falls back to the online style URL (if network available)
 3. Falls back to the bundled offline map
 
+## Map Configuration
+
+The server uses a three-tier map system to ensure maps are always available:
+
+### 1. Online Map (Default)
+
+By default, when you first start the server, it serves an online map via `defaultOnlineStyleUrl`. This provides global coverage when internet connectivity is available.
+
+### 2. Fallback Map (Always Available Offline)
+
+A basic global map that ships with the application, typically the [CoMapeo Fallback Map](https://github.com/digidem/comapeo-fallback-smp). This provides:
+
+- Country outlines and borders
+- Major cities and populated places
+- Basic road network
+- Coastlines and major water bodies
+
+The fallback map ensures users always have some map coverage even without internet or a custom map.
+
+### 3. Custom Map (Optional)
+
+Users can optionally create or upload a detailed offline map for their specific area of interest using the Styled Map Package (SMP) format. Custom maps typically contain:
+
+- High-detail vector tiles for a specific region
+- Custom styling optimized for the use case
+- Detailed features like trails, buildings, land use, etc.
+- Much higher zoom levels than the fallback map
+
+**Fallback Logic:**
+
+When a client requests `/maps/default/style.json`, the server tries sources in this order:
+
+1. **Custom map** - If uploaded by the user
+2. **Online map** - If internet connectivity is available
+3. **Fallback map** - Always available as last resort
+
+This ensures maps work offline while providing the best available map for the current situation.
+
 ## Map Format: Styled Map Package (SMP)
 
 SMP files are zip archives containing all resources for a complete offline map:
@@ -184,7 +222,17 @@ Content-Type: application/octet-stream
 [binary SMP file data]
 ```
 
-Uploads a new custom map. The map becomes immediately available at `/maps/custom/`.
+Uploads a new custom map or replaces an existing one. The map becomes immediately available at `/maps/custom/`. This is how users add detailed offline maps for their specific area of interest.
+
+#### Delete Custom Map
+
+```http
+DELETE /maps/custom
+```
+
+Deletes the custom map. Returns 204 No Content on success, 404 if the map doesn't exist. Only the custom map can be deleted - the fallback map is protected.
+
+After deletion, the `/maps/default/` endpoint will fall back to the online map or fallback map.
 
 #### Get Map Info
 
@@ -487,6 +535,7 @@ The sender provides all their local IP addresses in `downloadUrls`. The receiver
 - [CoMapeo](https://comapeo.app/) - Offline-first mapping for territorial monitoring
 - [MapLibre GL JS](https://maplibre.org/maplibre-gl-js/) - Open-source vector map rendering
 - [Styled Map Package](https://github.com/digidem/styled-map-package) - SMP format specification
+- [CoMapeo Fallback Map](https://github.com/digidem/comapeo-fallback-smp) - Basic global map with country outlines and major cities
 - [secret-stream-http](https://github.com/holepunchto/secret-stream-http) - Encrypted HTTP over TCP
 
 ## License
