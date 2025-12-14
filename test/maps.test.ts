@@ -157,6 +157,61 @@ describe('Maps API', () => {
 			// Should either return the sprite or 404 if not present, not 500
 			expect([200, 404]).toContain(response.status)
 		})
+
+		it('should serve glyphs with correct content-type', async () => {
+			// Try to fetch glyphs - using a common font stack
+			const response = await fetch(
+				`${baseUrl}/maps/fallback/glyphs/Noto Sans Regular/0-255.pbf`,
+			)
+			// Glyphs may or may not exist, but should not 500
+			expect([200, 404]).toContain(response.status)
+
+			if (response.status === 200) {
+				// Should have protobuf content-type
+				const contentType = response.headers.get('content-type')
+				expect(contentType).toContain('application/x-protobuf')
+			}
+		})
+
+		it('should include content-length header for style.json', async () => {
+			const response = await fetch(`${baseUrl}/maps/custom/style.json`)
+			expect(response.status).toBe(200)
+
+			const contentLength = response.headers.get('content-length')
+			expect(contentLength).toBeTruthy()
+
+			// Verify content-length matches actual body length
+			const body = await response.text()
+			expect(parseInt(contentLength!)).toBe(new TextEncoder().encode(body).length)
+		})
+
+		it('should include content-length header for tiles', async () => {
+			const response = await fetch(`${baseUrl}/maps/custom/0/0/0.pbf`)
+
+			if (response.status === 200) {
+				const contentLength = response.headers.get('content-length')
+				expect(contentLength).toBeTruthy()
+
+				// Verify content-length matches actual body length
+				const arrayBuffer = await response.arrayBuffer()
+				expect(parseInt(contentLength!)).toBe(arrayBuffer.byteLength)
+			}
+		})
+
+		it('should handle gzip-encoded resources', async () => {
+			// Glyphs are typically gzip-encoded
+			const response = await fetch(
+				`${baseUrl}/maps/fallback/glyphs/Noto Sans Regular/0-255.pbf`,
+			)
+
+			if (response.status === 200) {
+				const encoding = response.headers.get('content-encoding')
+				// May be gzip, or may not be encoded - both are valid
+				if (encoding) {
+					expect(encoding).toBe('gzip')
+				}
+			}
+		})
 	})
 
 	describe('Map Upload', () => {
